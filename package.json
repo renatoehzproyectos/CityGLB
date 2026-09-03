@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
-    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate && (cp dist/index.html dist/404.html || cp .output/public/index.html .output/public/404.html || true)",
+    "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate && (cp dist/index.html dist/404.html || cp .output/public/index.html .output/public/404.html || cp .vercel/output/static/index.html .vercel/output/static/404.html || true)",
     "db:migrate": "node scripts/migrate.mjs",
     "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
     "preview": "node scripts/with-app-env.mjs vite preview",

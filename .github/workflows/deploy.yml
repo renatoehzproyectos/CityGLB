@@ -42,8 +42,10 @@ jobs:
             echo "path=./dist" >> "$GITHUB_OUTPUT"
           elif [ -d ".output/public" ] && [ -f ".output/public/index.html" ]; then
             echo "path=./.output/public" >> "$GITHUB_OUTPUT"
+          elif [ -d ".vercel/output/static" ] && [ -f ".vercel/output/static/index.html" ]; then
+            echo "path=./.vercel/output/static" >> "$GITHUB_OUTPUT"
           else
-            echo "No se encontró carpeta de salida esperada (dist o .output/public)."
+            echo "No se encontró carpeta de salida esperada (dist, .output/public o .vercel/output/static)."
             ls -la
             exit 1
           fi
