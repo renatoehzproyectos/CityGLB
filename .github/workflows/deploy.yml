@@ -35,10 +35,23 @@ jobs:
       - name: Build project
         run: npm run build
 
+      - name: Detect output directory
+        id: outdir
+        run: |
+          if [ -d "dist" ] && [ -f "dist/index.html" ]; then
+            echo "path=./dist" >> "$GITHUB_OUTPUT"
+          elif [ -d ".output/public" ] && [ -f ".output/public/index.html" ]; then
+            echo "path=./.output/public" >> "$GITHUB_OUTPUT"
+          else
+            echo "No se encontró carpeta de salida esperada (dist o .output/public)."
+            ls -la
+            exit 1
+          fi
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './dist' # Si Nitro redirige la salida pública, cambia esta ruta a './.output/public'
+          path: ${{ steps.outdir.outputs.path }}
 
       - name: Deploy to GitHub Pages
         id: deployment
