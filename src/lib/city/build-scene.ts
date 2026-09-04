@@ -133,7 +133,23 @@ function bufferPolyline(pts: [number, number][], half: number): [number, number]
 
 function mergeOrEmpty(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
   if (!geos.length) return null;
-  const merged = mergeGeometries(geos, false);
+  let merged: THREE.BufferGeometry | null = null;
+  try {
+    merged = mergeGeometries(geos, false);
+  } catch (e) {
+    console.warn("mergeGeometries failed (mismatched attributes?)", e);
+    merged = null;
+  }
+  if (!merged) {
+    // Attribute sets didn't line up across the batch (e.g. one geometry has
+    // uv/color and another doesn't) — three.js merges nothing in that case
+    // instead of throwing, so fall back to keeping just the first geometry
+    // rather than silently losing the whole batch or propagating a null.
+    console.warn(`mergeGeometries returned null for ${geos.length} geometries; keeping first only`);
+    merged = geos[0] ?? null;
+    for (const g of geos.slice(1)) g.dispose();
+    return merged;
+  }
   for (const g of geos) g.dispose();
   return merged;
 }
@@ -263,6 +279,7 @@ function roofClutterGeometry(b: BuildingFeature): THREE.BufferGeometry | null {
     const d = 1.1 + ((t2 + t3) % 1) * 1.3;
     const h = 0.7 + ((t1 + t3) % 1) * 0.9;
     const box = new THREE.BoxGeometry(w, h, d);
+    box.deleteAttribute("uv"); // keep attribute set identical to pyramid roofs (position/normal/color only)
     box.translate(cx + Math.cos(ang) * dist, h / 2, cz + Math.sin(ang) * dist);
     geos.push(box);
   }
@@ -647,6 +664,7 @@ function portGeometry(features: PortFeature[], grid: HeightGrid | null): THREE.B
       const shape = toShape(p.ring);
       if (shape) geo = extrudeShape(shape, 0.3);
       if (geo) {
+        geo.deleteAttribute("uv"); // match ribbon-derived geometries (position/normal/color only) before merge
         if (grid) drapeOntoTerrain(geo, grid, 0.05);
         else geo.translate(0, 0.05, 0);
       }
