@@ -97,6 +97,9 @@ function LoadingOverlay({
         const target = Math.max(0, Math.min(100, progress));
         // Ease toward target; never go backwards.
         if (target <= prev) return prev;
+        // Snap instantly once generation is actually done, so the bar never
+        // gets stuck mid-animation behind a real target that already hit 100.
+        if (target >= 100) return 100;
         const next = prev + Math.max(0.15, (target - prev) * 0.12);
         return next >= target ? target : next;
       });
