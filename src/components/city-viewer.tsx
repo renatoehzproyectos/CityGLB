@@ -151,8 +151,36 @@ export function CityViewer({
       if (dead || !hostRef.current) return;
 
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0b0c0d);
-      scene.fog = new THREE.Fog(0x0b0c0d, 400, 2200);
+
+      // Sky gradient (horizon haze → zenith blue) instead of a flat void, plus
+      // matching fog color so distant geometry fades into the same atmosphere
+      // rather than a black wall. Built once as a small vertical canvas.
+      const skyCanvas = document.createElement("canvas");
+      skyCanvas.width = 2;
+      skyCanvas.height = 128;
+      const skyCtx = skyCanvas.getContext("2d")!;
+      const grad = skyCtx.createLinearGradient(0, 0, 0, 128);
+      grad.addColorStop(0, "#3d6fb0"); // zenith
+      grad.addColorStop(0.55, "#a8c7e0"); // mid sky
+      grad.addColorStop(0.82, "#dbe8ee"); // haze near horizon
+      grad.addColorStop(1, "#eef3f2"); // horizon
+      skyCtx.fillStyle = grad;
+      skyCtx.fillRect(0, 0, 2, 128);
+      const skyTex = new THREE.CanvasTexture(skyCanvas);
+      skyTex.colorSpace = THREE.SRGBColorSpace;
+      const skyGeo = new THREE.SphereGeometry(6000, 24, 16);
+      const skyMat = new THREE.MeshBasicMaterial({
+        map: skyTex,
+        side: THREE.BackSide,
+        fog: false,
+        depthWrite: false,
+      });
+      const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+      skyMesh.name = "sky";
+      skyMesh.renderOrder = -10;
+      scene.add(skyMesh);
+      scene.background = new THREE.Color(0xdbe8ee);
+      scene.fog = new THREE.Fog(0xd7e6ea, 500, 3200);
 
       const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 8000);
       const { width, depth } = bboxSizeMeters(city.bbox);
@@ -196,6 +224,8 @@ export function CityViewer({
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.05;
+      renderer.shadowMap.enabled = !isMobile;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       host.appendChild(renderer.domElement);
       renderer.domElement.style.display = "block";
       renderer.domElement.style.width = "100%";
@@ -206,14 +236,29 @@ export function CityViewer({
       renderer.domElement.style.setProperty("-webkit-touch-callout", "none");
       renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
-      const hemi = new THREE.HemisphereLight(0xb8c4d4, 0x3a342c, 0.85);
+      const hemi = new THREE.HemisphereLight(0xcfe0ee, 0x3a342c, 0.9);
       scene.add(hemi);
-      const dir = new THREE.DirectionalLight(0xfff1e0, 1.25);
+      const dir = new THREE.DirectionalLight(0xfff1e0, 1.35);
       dir.position.set(span * 0.4, span * 0.9, span * 0.25);
+      dir.target.position.set(0, 0, 0);
       scene.add(dir);
+      scene.add(dir.target);
+      if (renderer.shadowMap.enabled) {
+        dir.castShadow = true;
+        dir.shadow.mapSize.set(2048, 2048);
+        const shadowSpan = Math.min(span * 0.8, 1400);
+        dir.shadow.camera.left = -shadowSpan;
+        dir.shadow.camera.right = shadowSpan;
+        dir.shadow.camera.top = shadowSpan;
+        dir.shadow.camera.bottom = -shadowSpan;
+        dir.shadow.camera.near = span * 0.05;
+        dir.shadow.camera.far = span * 2.2;
+        dir.shadow.bias = -0.0006;
+        dir.shadow.normalBias = 0.4;
+      }
       // Stronger ambient so satellite / land-cover albedo stays readable from above
       // (ACES tone-mapping otherwise crushes photo textures into mud).
-      scene.add(new THREE.AmbientLight(0xffffff, satellite || landCover ? 0.35 : 0.18));
+      scene.add(new THREE.AmbientLight(0xffffff, satellite || landCover ? 0.35 : 0.22));
       if (satellite || landCover) {
         renderer.toneMappingExposure = 1.2;
       }
@@ -237,6 +282,7 @@ export function CityViewer({
 
       const applyLayers = (l: Layers) => {
         if (meshes.buildings) meshes.buildings.visible = l.buildings;
+        if (meshes.roofs) meshes.roofs.visible = l.buildings;
         if (meshes.trees) meshes.trees.visible = l.trees;
         if (meshes.roads) meshes.roads.visible = l.roads;
         if (meshes.water) meshes.water.visible = l.water;
@@ -365,6 +411,9 @@ export function CityViewer({
         timer.dispose();
         orbit.dispose();
         vehicleRef.current?.dispose();
+        skyGeo.dispose();
+        skyMat.dispose();
+        skyTex.dispose();
         disposeCityMeshes(meshes);
         renderer.dispose();
         renderer.forceContextLoss();
@@ -393,6 +442,9 @@ export function CityViewer({
         setRotateRef.current = null;
         markerGeo.dispose();
         markerMat.dispose();
+        skyGeo.dispose();
+        skyMat.dispose();
+        skyTex.dispose();
         disposeCityMeshes(meshes);
         renderer.dispose();
         renderer.forceContextLoss();

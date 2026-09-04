@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { BUILDING_TINTS, cfg } from "./config";
+import { BUILDING_TINTS, FACADE_PALETTES, ROOF_TINTS, cfg } from "./config";
 import { bboxSizeMeters, ringArea, unproject } from "./geo";
 import type { BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
 import { fetchHeightGrid, sampleHeight, type HeightGrid } from "./elevation";
@@ -69,14 +69,44 @@ function paintGeometry(geo: THREE.BufferGeometry, color: [number, number, number
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
+/** Stable 0..1 hash from a building footprint so the same building always
+ * gets the same facade/roof variant (no flicker on rebuilds). */
+function buildingHash(b: BuildingFeature): number {
+  let h = 0x811c9dc5;
+  for (const [x, z] of b.ring) {
+    h ^= Math.round(x * 37) | 0;
+    h = Math.imul(h, 16777619);
+    h ^= Math.round(z * 37) | 0;
+    h = Math.imul(h, 16777619);
+  }
+  h ^= Math.round(b.height * 97) | 0;
+  h = Math.imul(h, 16777619);
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+function pickVariant<T>(list: T[], t: number): T {
+  const i = Math.min(list.length - 1, Math.floor(t * list.length));
+  return list[i];
+}
+
+/** Individualized facade color: palette variant per kind, shaded slightly by height. */
 function buildingColor(b: BuildingFeature): [number, number, number] {
-  const base = BUILDING_TINTS[b.kind] ?? cfg.BUILDING_COLOR;
-  const t = Math.min(1, Math.max(0, (b.height - 8) / 80));
+  const palette = FACADE_PALETTES[b.kind] ?? FACADE_PALETTES.default;
+  const t = buildingHash(b);
+  const base = pickVariant(palette, t) ?? BUILDING_TINTS[b.kind] ?? cfg.BUILDING_COLOR;
+  const th = Math.min(1, Math.max(0, (b.height - 8) / 80));
   return [
-    base[0] * (1 - t * 0.12),
-    base[1] * (1 - t * 0.08),
-    base[2] * (1 - t * 0.02) + t * 0.04,
+    base[0] * (1 - th * 0.12),
+    base[1] * (1 - th * 0.08),
+    base[2] * (1 - th * 0.02) + th * 0.04,
   ];
+}
+
+/** Roof tint variant per building, following the same stable hash as the facade. */
+function roofColor(b: BuildingFeature): [number, number, number] {
+  const palette = ROOF_TINTS[b.kind] ?? ROOF_TINTS.default;
+  const t = 1 - buildingHash(b); // decorrelate from facade pick
+  return pickVariant(palette, t < 0 ? 0 : t > 1 ? 1 : t);
 }
 
 function bufferPolyline(pts: [number, number][], half: number): [number, number][] | null {
@@ -165,8 +195,88 @@ function drapeOntoTerrain(
   geo.computeVertexNormals();
 }
 
-function buildingsGeometry(features: BuildingFeature[], grid: HeightGrid | null): THREE.BufferGeometry | null {
+/**
+ * Pyramid/hip roof for a building footprint: eave ring (slightly overhanging
+ * the walls) lofted up to an apex above the centroid. Cheap to compute for
+ * arbitrary polygons (no straight-skeleton needed) and reads as a proper
+ * pitched roof from any angle, unlike a flat extrusion cap.
+ */
+function roofGeometry(b: BuildingFeature): THREE.BufferGeometry | null {
+  const ring = closedRing(b.ring);
+  if (ring.length < 3) return null;
+  const [cx, cz] = centroid(ring);
+  const area = ringArea(ring);
+  const r = Math.sqrt(Math.max(area, 1) / Math.PI);
+  const rise = Math.min(cfg.ROOF_RISE_MAX, Math.max(cfg.ROOF_RISE_MIN, r * 0.32));
+
+  const n = ring.length;
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  // Eave ring (x, 0, z) — overhangs the wall slightly for an eave shadow line.
+  for (let i = 0; i < n; i++) {
+    const [x, z] = ring[i];
+    let ex = x - cx;
+    let ez = z - cz;
+    const len = Math.hypot(ex, ez) || 1;
+    ex = x + (ex / len) * cfg.ROOF_INSET;
+    ez = z + (ez / len) * cfg.ROOF_INSET;
+    positions.push(ex, 0, ez);
+  }
+  // Apex
+  const apexIdx = n;
+  positions.push(cx, rise, cz);
+
+  for (let i = 0; i < n; i++) {
+    const a = i;
+    const bI = (i + 1) % n;
+    indices.push(a, apexIdx, bI);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Small rooftop clutter (AC units / mechanical boxes) for flat/tall roofs
+ * that don't get a pitched roof — cheap microdetail that reads at close range
+ * without needing real MEP modeling.
+ */
+function roofClutterGeometry(b: BuildingFeature): THREE.BufferGeometry | null {
+  const area = ringArea(b.ring);
+  if (area < 120) return null;
+  const [cx, cz] = centroid(b.ring);
+  const r = Math.sqrt(area / Math.PI);
+  const seed = buildingHash(b);
+  const count = Math.min(4, Math.max(1, Math.floor(area / 260)));
   const geos: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < count; i++) {
+    const t1 = (seed * 97 + i * 53.7) % 1;
+    const t2 = (seed * 193 + i * 29.3) % 1;
+    const t3 = (seed * 311 + i * 71.1) % 1;
+    const ang = t1 * Math.PI * 2;
+    const dist = t2 * r * 0.45;
+    const w = 1.1 + t3 * 1.3;
+    const d = 1.1 + ((t2 + t3) % 1) * 1.3;
+    const h = 0.7 + ((t1 + t3) % 1) * 0.9;
+    const box = new THREE.BoxGeometry(w, h, d);
+    box.translate(cx + Math.cos(ang) * dist, h / 2, cz + Math.sin(ang) * dist);
+    geos.push(box);
+  }
+  const merged = mergeOrEmpty(geos);
+  if (merged) paintGeometry(merged, [0.52, 0.53, 0.55]);
+  return merged;
+}
+
+function buildingsGeometry(
+  features: BuildingFeature[],
+  grid: HeightGrid | null
+): { walls: THREE.BufferGeometry | null; roofs: THREE.BufferGeometry | null } {
+  const wallGeos: THREE.BufferGeometry[] = [];
+  const roofGeos: THREE.BufferGeometry[] = [];
   for (const b of features) {
     if (b.height < cfg.MIN_BUILDING_HEIGHT) continue;
     if (ringArea(b.ring) < cfg.MIN_BUILDING_AREA) continue;
@@ -174,16 +284,158 @@ function buildingsGeometry(features: BuildingFeature[], grid: HeightGrid | null)
     if (!shape) continue;
     const geo = extrudeShape(shape, b.height);
     if (!geo) continue;
-    if (grid) {
-      // Rigid vertical lift to the lowest ground under the footprint so walls stay
-      // straight and nothing floats or sinks through the terrain.
-      const h = footprintMinHeight(grid, b.ring);
-      geo.translate(0, h, 0);
-    }
+
+    const baseY = grid ? footprintMinHeight(grid, b.ring) : 0;
+    geo.translate(0, baseY, 0);
     paintGeometry(geo, buildingColor(b));
-    geos.push(geo);
+    wallGeos.push(geo);
+
+    if (cfg.ENABLE_ROOFS && b.height <= cfg.ROOF_MAX_HEIGHT_FOR_PITCH && !b.holes.length) {
+      const rGeo = roofGeometry(b);
+      if (rGeo) {
+        rGeo.translate(0, baseY + b.height, 0);
+        paintGeometry(rGeo, roofColor(b));
+        roofGeos.push(rGeo);
+      }
+    } else {
+      // Flat-roofed / tall buildings get rooftop clutter instead of a pitch.
+      const clutter = roofClutterGeometry(b);
+      if (clutter) {
+        clutter.translate(0, baseY + b.height, 0);
+        roofGeos.push(clutter);
+      }
+    }
   }
-  return mergeOrEmpty(geos);
+  return { walls: mergeOrEmpty(wallGeos), roofs: mergeOrEmpty(roofGeos) };
+}
+
+/**
+ * Procedural window/facade texture: a light neutral base (so the per-building
+ * vertex-color tint reads through) with a grid of darker glass rectangles and
+ * thin frame lines. Applied with real-world-scaled repeat so window size stays
+ * consistent across small and large buildings.
+ */
+let cachedWindowNormalMap: THREE.Texture | null = null;
+function createWindowNormalMap(): THREE.Texture {
+  if (cachedWindowNormalMap) return cachedWindowNormalMap;
+  const size = cfg.WINDOW_TEXTURE_SIZE;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+
+  // Heightmap pass: recessed glass, raised frame/sill — same layout as the
+  // color texture so the relief lines up with the visible windows.
+  ctx.fillStyle = "#808080"; // neutral height
+  ctx.fillRect(0, 0, size, size);
+  const cols = 4;
+  const rows = 5;
+  const padX = size / cols;
+  const padY = size / rows;
+  const winW = padX * 0.62;
+  const winH = padY * 0.68;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c * padX + (padX - winW) / 2;
+      const y = r * padY + (padY - winH) / 2;
+      // frame: slightly raised ring
+      ctx.fillStyle = "#9c9c9c";
+      ctx.fillRect(x - 3, y - 3, winW + 6, winH + 6);
+      // glass: recessed
+      ctx.fillStyle = "#5c5c5c";
+      ctx.fillRect(x, y, winW, winH);
+      // sill: raised strip under the window
+      ctx.fillStyle = "#a8a8a8";
+      ctx.fillRect(x - 3, y + winH + 3, winW + 6, size * 0.02);
+    }
+  }
+
+  const heightData = ctx.getImageData(0, 0, size, size);
+  const normalData = ctx.createImageData(size, size);
+  const strength = 2.2;
+  const at = (x: number, y: number) => {
+    const xi = (x + size) % size;
+    const yi = (y + size) % size;
+    return heightData.data[(yi * size + xi) * 4] / 255;
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const hl = at(x - 1, y);
+      const hr = at(x + 1, y);
+      const hd = at(x, y - 1);
+      const hu = at(x, y + 1);
+      let nx = (hl - hr) * strength;
+      let ny = (hd - hu) * strength;
+      const nz = 1;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      nx /= len;
+      ny /= len;
+      const nzn = nz / len;
+      const idx = (y * size + x) * 4;
+      normalData.data[idx] = Math.round((nx * 0.5 + 0.5) * 255);
+      normalData.data[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      normalData.data[idx + 2] = Math.round((nzn * 0.5 + 0.5) * 255);
+      normalData.data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(normalData, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1 / cfg.FACADE_METERS_PER_TILE, 1 / cfg.FACADE_METERS_PER_TILE);
+  tex.needsUpdate = true;
+  cachedWindowNormalMap = tex;
+  return tex;
+}
+let cachedWindowTexture: THREE.Texture | null = null;
+function createWindowTexture(): THREE.Texture {
+  if (cachedWindowTexture) return cachedWindowTexture;
+  const size = cfg.WINDOW_TEXTURE_SIZE;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#e9e6df";
+  ctx.fillRect(0, 0, size, size);
+
+  const cols = 4;
+  const rows = 5;
+  const padX = size / cols;
+  const padY = size / rows;
+  const winW = padX * 0.62;
+  const winH = padY * 0.68;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c * padX + (padX - winW) / 2;
+      const y = r * padY + (padY - winH) / 2;
+      const shade = 30 + Math.round(((c * 7 + r * 13) % 5) * 6); // subtle per-window variation
+      ctx.fillStyle = `rgb(${shade + 10}, ${shade + 18}, ${shade + 30})`;
+      ctx.fillRect(x, y, winW, winH);
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = Math.max(1, size * 0.006);
+      ctx.strokeRect(x, y, winW, winH);
+      // mullion
+      ctx.beginPath();
+      ctx.moveTo(x + winW / 2, y);
+      ctx.lineTo(x + winW / 2, y + winH);
+      ctx.moveTo(x, y + winH / 2);
+      ctx.lineTo(x + winW, y + winH / 2);
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = Math.max(1, size * 0.004);
+      ctx.stroke();
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.repeat.set(1 / cfg.FACADE_METERS_PER_TILE, 1 / cfg.FACADE_METERS_PER_TILE);
+  tex.needsUpdate = true;
+  cachedWindowTexture = tex;
+  return tex;
 }
 
 /**
@@ -225,10 +477,17 @@ function roadRibbonGeometry(
 
   const n = pts.length;
   const positions: number[] = [];
+  const colors: number[] = [];
   const indices: number[] = [];
   // Clearance above DEM: coarse elevation grids (15–40 m) can undershoot the
   // rendered terrain triangle by several decimeters; keep roads clearly on top.
   const LIFT = 0.35;
+  // 4 verts per station: edge(curb/sidewalk, light) — inner(asphalt, dark) x2 — edge(light).
+  // Skip the curb band on very narrow paths (footways etc.) where it'd be visually noisy.
+  const hasCurb = halfWidth > 2.2;
+  const innerFrac = hasCurb ? 0.86 : 1;
+  const roadC: [number, number, number] = [...cfg.ROAD_COLOR];
+  const edgeC: [number, number, number] = [...cfg.ROAD_EDGE_COLOR];
 
   for (let i = 0; i < n; i++) {
     const prev = pts[Math.max(0, i - 1)];
@@ -243,38 +502,45 @@ function roadRibbonGeometry(
 
     const x = pts[i][0];
     const z = pts[i][1];
-    const lx = x + nx * halfWidth;
-    const lz = z + nz * halfWidth;
-    const rx = x - nx * halfWidth;
-    const rz = z - nz * halfWidth;
+    const innerHalf = halfWidth * innerFrac;
 
-    let yL = LIFT;
-    let yR = LIFT;
-    if (grid) {
-      const hL = heightAtFeature(grid, lx, lz);
-      const hR = heightAtFeature(grid, rx, rz);
-      const hC = heightAtFeature(grid, x, z);
-      // Use max of center + edges so neither side sinks into a slope
-      const base = Math.max(hL, hR, hC);
-      yL = base + LIFT;
-      yR = base + LIFT;
+    const offsets: [number, [number, number, number]][] = [
+      [halfWidth, edgeC],
+      [innerHalf, roadC],
+      [-innerHalf, roadC],
+      [-halfWidth, edgeC],
+    ];
+
+    for (const [off, col] of offsets) {
+      const vx = x + nx * off;
+      const vz = z + nz * off;
+      let y = LIFT;
+      if (grid) {
+        const hV = heightAtFeature(grid, vx, vz);
+        const hC = heightAtFeature(grid, x, z);
+        y = Math.max(hV, hC) + LIFT;
+      }
+      positions.push(vx, y + thickness, vz);
+      colors.push(col[0], col[1], col[2]);
     }
-
-    positions.push(lx, yL + thickness, lz);
-    positions.push(rx, yR + thickness, rz);
   }
 
   for (let i = 0; i < n - 1; i++) {
-    const a = i * 2;
-    const b = a + 1;
-    const c = a + 2;
-    const d = a + 3;
-    indices.push(a, c, b);
-    indices.push(b, c, d);
+    const base = i * 4;
+    const nextBase = base + 4;
+    for (let k = 0; k < 3; k++) {
+      const a = base + k;
+      const b = base + k + 1;
+      const c = nextBase + k;
+      const d = nextBase + k + 1;
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   geo.setIndex(indices);
   geo.computeVertexNormals();
   return geo;
@@ -287,6 +553,67 @@ function roadsGeometry(features: RoadFeature[], grid: HeightGrid | null): THREE.
     if (r.width < 1.2) continue; // skip tiny footpaths for cleaner mesh
     const geo = roadRibbonGeometry(r.path, r.width / 2, grid);
     if (!geo) continue;
+    geos.push(geo);
+  }
+  const junctions = roadJunctionsGeometry(features, grid);
+  if (junctions) geos.push(junctions);
+  return mergeOrEmpty(geos);
+}
+
+/**
+ * Fills the gaps at street intersections with a flat paved disc sized to the
+ * widest road meeting there, so junctions read as continuous pavement instead
+ * of two ribbons crossing with visible notches (real streets have a merged
+ * intersection surface, not raw crossing strips).
+ */
+function roadJunctionsGeometry(features: RoadFeature[], grid: HeightGrid | null): THREE.BufferGeometry | null {
+  type Node = { x: number; z: number; maxHalf: number; roads: number };
+  const cellSize = 3; // meters — endpoints within this snap together
+  const buckets = new Map<string, Node>();
+
+  const key = (x: number, z: number) => `${Math.round(x / cellSize)}:${Math.round(z / cellSize)}`;
+
+  for (const r of features) {
+    if (r.path.length < 2 || r.width < 1.2) continue;
+    const half = r.width / 2;
+    for (const [x, z] of [r.path[0], r.path[r.path.length - 1]]) {
+      const k = key(x, z);
+      const existing = buckets.get(k);
+      if (existing) {
+        existing.x = (existing.x * existing.roads + x) / (existing.roads + 1);
+        existing.z = (existing.z * existing.roads + z) / (existing.roads + 1);
+        existing.maxHalf = Math.max(existing.maxHalf, half);
+        existing.roads += 1;
+      } else {
+        buckets.set(k, { x, z, maxHalf: half, roads: 1 });
+      }
+    }
+  }
+
+  const geos: THREE.BufferGeometry[] = [];
+  const roadC: [number, number, number] = [...cfg.ROAD_COLOR];
+  for (const node of buckets.values()) {
+    if (node.roads < 2) continue; // only real junctions, not dead ends
+    const r = node.maxHalf * 1.08;
+    const segs = 12;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const LIFT = 0.35 + cfg.ROAD_HEIGHT + 0.03; // sit just above ribbon tops to cleanly cover seams
+    const yc = grid ? heightAtFeature(grid, node.x, node.z) : 0;
+    positions.push(node.x, yc + LIFT, node.z);
+    for (let i = 0; i <= segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      const px = node.x + Math.cos(a) * r;
+      const pz = node.z + Math.sin(a) * r;
+      const y = grid ? Math.max(yc, heightAtFeature(grid, px, pz)) : 0;
+      positions.push(px, y + LIFT, pz);
+    }
+    for (let i = 1; i <= segs; i++) indices.push(0, i, i + 1);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    paintGeometry(geo, roadC);
     geos.push(geo);
   }
   return mergeOrEmpty(geos);
@@ -401,57 +728,98 @@ function flatTerrainGeometry(data: CityData): THREE.BufferGeometry {
   return geo;
 }
 
-// Simple procedural tree (fallback if EZ-Tree not loaded). Trunk + foliage.
-function createSimpleTreeGeometry(): { geometry: THREE.BufferGeometry; material: THREE.Material } {
-  const trunk = new THREE.CylinderGeometry(0.25, 0.4, 4, 6);
-  trunk.translate(0, 2, 0);
-  const foliage = new THREE.ConeGeometry(2.2, 5, 7);
-  foliage.translate(0, 5.5, 0);
-  const merged = mergeGeometries([trunk, foliage], false)!;
-  trunk.dispose();
-  foliage.dispose();
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x3d6b3a,
-    roughness: 0.9,
-    metalness: 0,
-    flatShading: true,
-  });
-  // Color trunk darker via vertex colors? For simplicity uniform greenish, or separate but for instancing one mat.
-  // Better two materials but InstancedMesh one. Use vertex colors.
+// Procedural trees: a small family of shapes (conifer / rounded broadleaf /
+// layered) so a scattered forest doesn't read as one repeated cookie-cutter
+// mesh. Trunk + volumetric canopy, colored via vertex colors for instancing.
+type TreeKind = "conifer" | "round" | "layered";
+
+function paintTree(merged: THREE.BufferGeometry, trunkTopY: number, canopyTint: [number, number, number]): void {
   const count = merged.getAttribute("position").count;
   const colors = new Float32Array(count * 3);
-  // Rough: lower half trunk brown
   const pos = merged.getAttribute("position");
   for (let i = 0; i < count; i++) {
     const y = pos.getY(i);
-    if (y < 3.5) {
-      colors[i * 3] = 0.35; colors[i * 3 + 1] = 0.22; colors[i * 3 + 2] = 0.12;
+    if (y < trunkTopY) {
+      colors[i * 3] = 0.32 + (i % 5) * 0.01;
+      colors[i * 3 + 1] = 0.2;
+      colors[i * 3 + 2] = 0.11;
     } else {
-      colors[i * 3] = 0.25; colors[i * 3 + 1] = 0.45; colors[i * 3 + 2] = 0.22;
+      colors[i * 3] = canopyTint[0];
+      colors[i * 3 + 1] = canopyTint[1];
+      colors[i * 3 + 2] = canopyTint[2];
     }
   }
   merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  mat.vertexColors = true;
-  return { geometry: merged, material: mat };
 }
+
+function createTreeGeometry(kind: TreeKind, tint: [number, number, number]): THREE.BufferGeometry {
+  let merged: THREE.BufferGeometry;
+  let trunkTop: number;
+  if (kind === "conifer") {
+    const trunk = new THREE.CylinderGeometry(0.22, 0.38, 3.4, 6);
+    trunk.translate(0, 1.7, 0);
+    const c1 = new THREE.ConeGeometry(2.1, 3.6, 8);
+    c1.translate(0, 4.6, 0);
+    const c2 = new THREE.ConeGeometry(1.55, 3.2, 8);
+    c2.translate(0, 6.6, 0);
+    const c3 = new THREE.ConeGeometry(0.95, 2.4, 8);
+    c3.translate(0, 8.4, 0);
+    merged = mergeGeometries([trunk, c1, c2, c3], false)!;
+    [trunk, c1, c2, c3].forEach((g) => g.dispose());
+    trunkTop = 3.0;
+  } else if (kind === "round") {
+    const trunk = new THREE.CylinderGeometry(0.26, 0.42, 3.6, 6);
+    trunk.translate(0, 1.8, 0);
+    const canopy = new THREE.IcosahedronGeometry(2.6, 1);
+    canopy.scale(1, 0.85, 1);
+    canopy.translate(0, 5.4, 0);
+    merged = mergeGeometries([trunk, canopy], false)!;
+    [trunk, canopy].forEach((g) => g.dispose());
+    trunkTop = 3.4;
+  } else {
+    const trunk = new THREE.CylinderGeometry(0.24, 0.4, 3.8, 6);
+    trunk.translate(0, 1.9, 0);
+    const lobe1 = new THREE.IcosahedronGeometry(1.9, 0);
+    lobe1.translate(-1.1, 5.0, 0.3);
+    const lobe2 = new THREE.IcosahedronGeometry(2.1, 0);
+    lobe2.translate(1.0, 5.6, -0.4);
+    const lobe3 = new THREE.IcosahedronGeometry(1.7, 0);
+    lobe3.translate(0.1, 6.6, 0.7);
+    merged = mergeGeometries([trunk, lobe1, lobe2, lobe3], false)!;
+    [trunk, lobe1, lobe2, lobe3].forEach((g) => g.dispose());
+    trunkTop = 3.6;
+  }
+  paintTree(merged, trunkTop, tint);
+  return merged;
+}
+
+// A handful of shape/tint combos so the tree canopy of a scattered forest
+// looks naturally varied rather than a single repeated instance.
+const TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
+  { kind: "conifer", tint: [0.15, 0.34, 0.17] },
+  { kind: "conifer", tint: [0.19, 0.4, 0.21] },
+  { kind: "round", tint: [0.26, 0.46, 0.22] },
+  { kind: "round", tint: [0.32, 0.5, 0.24] },
+  { kind: "layered", tint: [0.24, 0.42, 0.2] },
+  { kind: "layered", tint: [0.29, 0.47, 0.26] },
+];
 
 function scatterTrees(
   grid: HeightGrid,
   data: CityData,
   count: number,
   landCoverGrid: LandCoverGrid | null = null
-): THREE.InstancedMesh | null {
+): THREE.Group | null {
   if (count <= 0) return null;
-  const { geometry, material } = createSimpleTreeGeometry();
-  const mesh = new THREE.InstancedMesh(geometry, material, count);
-  mesh.name = "trees";
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+
+  const material = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.92,
+    metalness: 0,
+    flatShading: true,
+  });
 
   const matrix = new THREE.Matrix4();
-  const pos = new THREE.Vector3();
-  const quat = new THREE.Quaternion();
-  const scale = new THREE.Vector3();
   const dummy = new THREE.Object3D();
 
   // Simple rejection sampling over the grid
@@ -500,6 +868,8 @@ function scatterTrees(
     }
   }
 
+  const buckets: THREE.Matrix4[][] = TREE_VARIANTS.map(() => []);
+
   while (placed < count && attempts < maxAttempts) {
     attempts++;
     const u = rand(attempts * 2);
@@ -534,38 +904,54 @@ function scatterTrees(
       if (cls !== 0 && isBuiltOrWaterClass(cls)) continue;
     }
 
-    // Slight random scale / rotation
-    const s = 0.7 + rand(attempts * 3) * 0.9;
+    // Slight random scale / rotation / variant pick, and cluster same-variant
+    // trees loosely (real forests aren't a uniform shuffle of species).
+    const s = 0.65 + rand(attempts * 3) * 1.0;
     const rot = rand(attempts * 4) * Math.PI * 2;
+    const clusterSeed = Math.floor(x / 40) * 13 + Math.floor(z / 40) * 7;
+    const variantT = (rand(clusterSeed) * 0.7 + rand(attempts * 5) * 0.3) % 1;
+    const variantIdx = Math.min(TREE_VARIANTS.length - 1, Math.floor(variantT * TREE_VARIANTS.length));
 
-    // Terrain mesh uses Three Z = feature z
     dummy.position.set(x, h, z);
     dummy.rotation.set(0, rot, 0);
     dummy.scale.set(s, s, s);
     dummy.updateMatrix();
-    mesh.setMatrixAt(placed, dummy.matrix);
+    buckets[variantIdx].push(dummy.matrix.clone());
     placed++;
   }
 
-  mesh.count = placed;
-  mesh.instanceMatrix.needsUpdate = true;
+  const group = new THREE.Group();
+  group.name = "trees";
+  for (let vi = 0; vi < TREE_VARIANTS.length; vi++) {
+    const list = buckets[vi];
+    if (!list.length) continue;
+    const geometry = createTreeGeometry(TREE_VARIANTS[vi].kind, TREE_VARIANTS[vi].tint);
+    const im = new THREE.InstancedMesh(geometry, material, list.length);
+    im.castShadow = true;
+    im.receiveShadow = true;
+    for (let i = 0; i < list.length; i++) im.setMatrixAt(i, list[i]);
+    im.instanceMatrix.needsUpdate = true;
+    im.count = list.length;
+    group.add(im);
+  }
+
   if (placed === 0) {
-    mesh.geometry.dispose();
-    (mesh.material as THREE.Material).dispose();
+    material.dispose();
     return null;
   }
-  return mesh;
+  return group;
 }
 
 export type CityMeshes = {
   group: THREE.Group;
   buildings?: THREE.Mesh;
+  roofs?: THREE.Mesh;
   roads?: THREE.Mesh;
   water?: THREE.Mesh;
   ports?: THREE.Mesh;
   coastline?: THREE.Mesh;
   terrain: THREE.Mesh;
-  trees?: THREE.InstancedMesh;
+  trees?: THREE.Group;
   stats: { buildings: number; roads: number; water: number; ports: number; vertices: number; trees?: number };
   heightGrid?: HeightGrid | null;
 };
@@ -613,8 +999,8 @@ export async function buildCityMeshes(
 
   const elevPromise = !cfg.FLAT_TERRAIN
     ? fetchHeightGrid(data.bbox, data.origin, {
-        targetMeters: Math.max(15, Math.min(40, (data.extent.maxX - data.extent.minX) / 64)),
-        maxSamples: 80,
+        targetMeters: Math.max(8, Math.min(24, (data.extent.maxX - data.extent.minX) / 96)),
+        maxSamples: 140,
         onProgress: (f) => {
           elevFrac = f;
           reportFetch();
@@ -658,8 +1044,19 @@ export async function buildCityMeshes(
     flatShading: true,
     color: 0xffffff,
   });
+  if (cfg.ENABLE_WINDOWS) {
+    try {
+      buildingMat.map = createWindowTexture();
+      buildingMat.normalMap = createWindowNormalMap();
+      buildingMat.normalScale = new THREE.Vector2(0.6, 0.6);
+      buildingMat.needsUpdate = true;
+    } catch (e) {
+      console.warn("Window texture failed", e);
+    }
+  }
   const roadMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color().fromArray([...cfg.ROAD_COLOR]),
+    vertexColors: true,
+    color: 0xffffff,
     roughness: 0.92,
     metalness: 0.0,
     flatShading: true,
@@ -669,6 +1066,13 @@ export async function buildCityMeshes(
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
     depthWrite: true,
+  });
+  const roofMat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.75,
+    metalness: 0.02,
+    flatShading: true,
+    color: 0xffffff,
   });
   const waterMat = new THREE.MeshStandardMaterial({
     color: new THREE.Color().fromArray([...cfg.WATER_COLOR]),
@@ -767,19 +1171,30 @@ export async function buildCityMeshes(
   let vertices = terrainMesh.geometry.getAttribute("position").count;
 
   let buildingsMesh: THREE.Mesh | undefined;
+  let roofsMesh: THREE.Mesh | undefined;
   let roadsMesh: THREE.Mesh | undefined;
   let waterMesh: THREE.Mesh | undefined;
   let portsMesh: THREE.Mesh | undefined;
   let coastlineMesh: THREE.Mesh | undefined;
-  let treesMesh: THREE.InstancedMesh | undefined;
+  let treesMesh: THREE.Group | undefined;
+  let treeStatsCount = 0;
 
-  const bGeo = buildingsGeometry(data.buildings, grid);
+  const { walls: bGeo, roofs: roofGeo } = buildingsGeometry(data.buildings, grid);
   if (bGeo) {
     buildingsMesh = new THREE.Mesh(bGeo, buildingMat);
     buildingsMesh.name = "buildings";
     buildingsMesh.castShadow = true;
+    buildingsMesh.receiveShadow = true;
     group.add(buildingsMesh);
     vertices += bGeo.getAttribute("position").count;
+  }
+  if (roofGeo) {
+    roofsMesh = new THREE.Mesh(roofGeo, roofMat);
+    roofsMesh.name = "roofs";
+    roofsMesh.castShadow = true;
+    roofsMesh.receiveShadow = true;
+    group.add(roofsMesh);
+    vertices += roofGeo.getAttribute("position").count;
   }
 
   onProgress?.(0.75, "Meshing water…");
@@ -833,7 +1248,17 @@ export async function buildCityMeshes(
     treesMesh = scatterTrees(grid, data, desired, landCoverGrid) ?? undefined;
     if (treesMesh) {
       group.add(treesMesh);
-      vertices += treesMesh.geometry.getAttribute("position").count * (treesMesh.count || 0);
+      let treeVerts = 0;
+      let treeCount = 0;
+      treesMesh.traverse((obj) => {
+        const im = obj as THREE.InstancedMesh;
+        if ((im as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) {
+          treeVerts += im.geometry.getAttribute("position").count * (im.count || 0);
+          treeCount += im.count || 0;
+        }
+      });
+      vertices += treeVerts;
+      treeStatsCount = treeCount;
     }
   }
 
@@ -842,6 +1267,7 @@ export async function buildCityMeshes(
   return {
     group,
     buildings: buildingsMesh,
+    roofs: roofsMesh,
     roads: roadsMesh,
     water: waterMesh,
     ports: portsMesh,
@@ -854,7 +1280,7 @@ export async function buildCityMeshes(
       water: data.water.length,
       ports: data.ports.length,
       vertices,
-      trees: treesMesh?.count ?? 0,
+      trees: treeStatsCount,
     },
     heightGrid: grid,
   };
