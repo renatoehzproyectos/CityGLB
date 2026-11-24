@@ -74,8 +74,8 @@ type StudioState = {
   setMeshProgress: (fraction: number, label: string) => void;
 };
 
-const ROME_OFF: RomeOptions = { landmarks: false, labels: false, statues: false, pbr: false, srtm: false, hdSatellite: false, vegetation: false, atmosphere: false };
-const ROME_ON: RomeOptions = { landmarks: true, labels: true, statues: true, pbr: true, srtm: true, hdSatellite: true, vegetation: true, atmosphere: true };
+const ROME_OFF: RomeOptions = { landmarks: false, labels: false, statues: false, pbr: false, srtm: false, hdSatellite: false, vegetation: false, atmosphere: false, warmBuildings: false };
+const ROME_ON: RomeOptions = { landmarks: true, labels: true, statues: true, pbr: true, srtm: true, hdSatellite: true, vegetation: true, atmosphere: true, warmBuildings: true };
 
 function spanOf(bbox: BBox): number {
   const { width, depth } = bboxSizeMeters(bbox);

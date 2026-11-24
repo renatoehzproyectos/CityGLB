@@ -12,6 +12,13 @@ export async function buildLabels(
     /* usa fallback serif */
   }
   const linePts: number[] = [];
+  // Separa rótulos cercanos escalonando la altura (si no, se apilan y se pisan).
+  const placed: { x: number; z: number }[] = [];
+  items = [...items].sort((a, b) => b.height - a.height).map((it) => {
+    const near = placed.filter((p) => Math.hypot(p.x - it.x, p.z - it.z) < 160).length;
+    placed.push({ x: it.x, z: it.z });
+    return { ...it, height: it.height + near * 34 };
+  });
   for (const it of items) {
     const c = document.createElement("canvas");
     const g = c.getContext("2d")!;
@@ -39,7 +46,7 @@ export async function buildLabels(
       fog: false,
     });
     const sp = new THREE.Sprite(mat);
-    const hScreen = 0.035;
+    const hScreen = 0.026;
     sp.scale.set(hScreen * (w / 120), hScreen, 1);
     sp.position.set(it.x, it.groundY + it.height, it.z);
     sp.renderOrder = 50;

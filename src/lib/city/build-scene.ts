@@ -93,8 +93,32 @@ function pickVariant<T>(list: T[], t: number): T {
   return list[i];
 }
 
+const WARM_FACADES: [number, number, number][] = [
+  [0.86, 0.66, 0.46], // ocre
+  [0.9, 0.78, 0.6], // crema
+  [0.82, 0.52, 0.36], // terracota
+  [0.88, 0.6, 0.45], // salmón
+  [0.8, 0.68, 0.52], // arena
+  [0.92, 0.84, 0.7], // marfil
+  [0.78, 0.46, 0.32], // siena
+];
+const WARM_ROOFS: [number, number, number][] = [
+  [0.74, 0.3, 0.17],
+  [0.66, 0.26, 0.15],
+  [0.8, 0.36, 0.2],
+  [0.58, 0.24, 0.16],
+  [0.7, 0.4, 0.3],
+];
+const WARM_FLAT_ROOF: [number, number, number] = [0.66, 0.5, 0.4];
+let WARM = false;
+
 /** Individualized facade color: palette variant per kind, shaded slightly by height. */
 function buildingColor(b: BuildingFeature): [number, number, number] {
+  if (WARM) {
+    const w = pickVariant(WARM_FACADES, buildingHash(b));
+    const th = Math.min(1, Math.max(0, (b.height - 8) / 80));
+    return [w[0] * (1 - th * 0.1), w[1] * (1 - th * 0.08), w[2] * (1 - th * 0.04)];
+  }
   const palette = FACADE_PALETTES[b.kind] ?? FACADE_PALETTES.default;
   const t = buildingHash(b);
   const base = pickVariant(palette, t) ?? BUILDING_TINTS[b.kind] ?? cfg.BUILDING_COLOR;
@@ -108,6 +132,7 @@ function buildingColor(b: BuildingFeature): [number, number, number] {
 
 /** Roof tint variant per building, following the same stable hash as the facade. */
 function roofColor(b: BuildingFeature): [number, number, number] {
+  if (WARM) return pickVariant(WARM_ROOFS, 1 - buildingHash(b) * 0.999);
   const palette = ROOF_TINTS[b.kind] ?? ROOF_TINTS.default;
   const t = 1 - buildingHash(b); // decorrelate from facade pick
   return pickVariant(palette, t < 0 ? 0 : t > 1 ? 1 : t);
@@ -309,9 +334,28 @@ function buildingsGeometry(
     const baseY = grid ? footprintMinHeight(grid, b.ring) : 0;
     geo.translate(0, baseY, 0);
     paintGeometry(geo, buildingColor(b));
+    // Las tapas (normal ±Y) heredaban UV en metros y mostraban la rejilla de ventanas
+    // sobre los techos. Las apuntamos a una zona lisa de la textura y, en modo cálido,
+    // las pintamos como azotea.
+    {
+      const nrm = geo.getAttribute("normal");
+      const uv = geo.getAttribute("uv");
+      const col = geo.getAttribute("color");
+      if (nrm && uv) {
+        const flat = WARM ? WARM_FLAT_ROOF : null;
+        for (let i = 0; i < nrm.count; i++) {
+          if (Math.abs(nrm.getY(i)) > 0.9) {
+            uv.setXY(i, 0.03, 0.03);
+            if (flat && col) col.setXYZ(i, flat[0], flat[1], flat[2]);
+          }
+        }
+        uv.needsUpdate = true;
+        if (col) col.needsUpdate = true;
+      }
+    }
     wallGeos.push(geo);
 
-    if (cfg.ENABLE_ROOFS && b.height <= cfg.ROOF_MAX_HEIGHT_FOR_PITCH && !b.holes.length) {
+    if (cfg.ENABLE_ROOFS && b.height <= (WARM ? 60 : cfg.ROOF_MAX_HEIGHT_FOR_PITCH) && !b.holes.length) {
       const rGeo = roofGeometry(b);
       if (rGeo) {
         rGeo.translate(0, baseY + b.height, 0);
@@ -410,14 +454,16 @@ function createWindowNormalMap(): THREE.Texture {
   return tex;
 }
 let cachedWindowTexture: THREE.Texture | null = null;
-function createWindowTexture(): THREE.Texture {
-  if (cachedWindowTexture) return cachedWindowTexture;
+let cachedWarmWindowTexture: THREE.Texture | null = null;
+function createWindowTexture(warm = false): THREE.Texture {
+  if (warm && cachedWarmWindowTexture) return cachedWarmWindowTexture;
+  if (!warm && cachedWindowTexture) return cachedWindowTexture;
   const size = cfg.WINDOW_TEXTURE_SIZE;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#e9e6df";
+  ctx.fillStyle = warm ? "#fbf6ec" : "#e9e6df";
   ctx.fillRect(0, 0, size, size);
 
   const cols = 4;
@@ -431,9 +477,12 @@ function createWindowTexture(): THREE.Texture {
       const x = c * padX + (padX - winW) / 2;
       const y = r * padY + (padY - winH) / 2;
       const shade = 30 + Math.round(((c * 7 + r * 13) % 5) * 6); // subtle per-window variation
-      ctx.fillStyle = `rgb(${shade + 10}, ${shade + 18}, ${shade + 30})`;
+      // Cálido: ventanas pardas de bajo contraste (sombra de postigo), no vidrio negro.
+      ctx.fillStyle = warm
+        ? `rgb(${150 + shade * 0.4}, ${128 + shade * 0.3}, ${104 + shade * 0.25})`
+        : `rgb(${shade + 10}, ${shade + 18}, ${shade + 30})`;
       ctx.fillRect(x, y, winW, winH);
-      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.strokeStyle = warm ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.35)";
       ctx.lineWidth = Math.max(1, size * 0.006);
       ctx.strokeRect(x, y, winW, winH);
       // mullion
@@ -453,9 +502,11 @@ function createWindowTexture(): THREE.Texture {
   tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
-  tex.repeat.set(1 / cfg.FACADE_METERS_PER_TILE, 1 / cfg.FACADE_METERS_PER_TILE);
+  const tileM = warm ? 13 : cfg.FACADE_METERS_PER_TILE; // ventanas más espaciadas y grandes
+  tex.repeat.set(1 / tileM, 1 / tileM);
   tex.needsUpdate = true;
-  cachedWindowTexture = tex;
+  if (warm) cachedWarmWindowTexture = tex;
+  else cachedWindowTexture = tex;
   return tex;
 }
 
@@ -860,12 +911,12 @@ const TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
 ];
 
 const ROME_TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
-  { kind: "stonepine", tint: [0.1, 0.24, 0.12] },
-  { kind: "stonepine", tint: [0.13, 0.29, 0.14] },
-  { kind: "stonepine", tint: [0.16, 0.32, 0.15] },
-  { kind: "stonepine", tint: [0.11, 0.26, 0.16] },
-  { kind: "round", tint: [0.22, 0.4, 0.2] },
-  { kind: "conifer", tint: [0.1, 0.25, 0.13] }, // cipreses
+  { kind: "stonepine", tint: [0.07, 0.17, 0.09] },
+  { kind: "stonepine", tint: [0.09, 0.2, 0.1] },
+  { kind: "stonepine", tint: [0.11, 0.23, 0.1] },
+  { kind: "stonepine", tint: [0.08, 0.19, 0.11] },
+  { kind: "stonepine", tint: [0.1, 0.21, 0.12] },
+  { kind: "conifer", tint: [0.07, 0.18, 0.1] }, // cipreses
 ];
 
 /** Ruido de valor 2D suave (0..1) para agrupar árboles en bosquecillos. */
@@ -890,9 +941,35 @@ function scatterTrees(
   data: CityData,
   count: number,
   landCoverGrid: LandCoverGrid | null = null,
-  pines = false
+  pines = false,
+  satCanvas: HTMLCanvasElement | null = null
 ): THREE.Group | null {
   if (count <= 0) return null;
+
+  // Máscara de vegetación a partir del satélite (ExG = 2G − R − B): los árboles
+  // se concentran en parques y jardines, como en la escena real, en vez de repartirse parejo.
+  let greenMask: { w: number; h: number; data: Uint8Array } | null = null;
+  if (satCanvas && pines) {
+    try {
+      const w = 512;
+      const h = Math.max(64, Math.round((512 * satCanvas.height) / satCanvas.width));
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const cx = c.getContext("2d", { willReadFrequently: true })!;
+      cx.drawImage(satCanvas, 0, 0, w, h);
+      const px = cx.getImageData(0, 0, w, h).data;
+      const data = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+        const exg = 2 * g - r - b;
+        data[i] = exg > 14 && g < 170 ? 2 : exg > 4 && g < 150 ? 1 : 0;
+      }
+      greenMask = { w, h, data };
+    } catch {
+      greenMask = null; // canvas "tainted": se usa el reparto por ruido
+    }
+  }
   const variants = pines ? ROME_TREE_VARIANTS : TREE_VARIANTS;
 
   const material = new THREE.MeshStandardMaterial({
@@ -910,7 +987,7 @@ function scatterTrees(
   const depthM = data.extent.maxZ - data.extent.minZ;
   let placed = 0;
   let attempts = 0;
-  const maxAttempts = count * 8;
+  const maxAttempts = count * (greenMask ? 24 : 8);
   const seed = (data.origin.lon * 1000 + data.origin.lat * 100) | 0;
 
   function rand(i: number) {
@@ -1004,15 +1081,20 @@ function scatterTrees(
       if (cls !== 0 && isBuiltOrWaterClass(cls)) continue;
     }
 
-    // Bosquecillos: acepta siempre dentro de manchas de ruido y rara vez fuera.
-    if (pines) {
+    if (greenMask) {
+      const mu = Math.min(greenMask.w - 1, Math.max(0, Math.floor(((x - data.extent.minX) / widthM) * greenMask.w)));
+      const mv = Math.min(greenMask.h - 1, Math.max(0, Math.floor(((z - data.extent.minZ) / depthM) * greenMask.h)));
+      const g = greenMask.data[mv * greenMask.w + mu];
+      if (g === 0 && rand(attempts * 11) > 0.015) continue; // casi nunca fuera de zonas verdes
+      if (g === 1 && rand(attempts * 13) > 0.35) continue;
+    } else if (pines) {
       const n = valueNoise(x / 90, z / 90, seed) * 0.65 + valueNoise(x / 35, z / 35, seed + 3) * 0.35;
       if (n < 0.5 && rand(attempts * 7) > 0.1) continue;
     }
 
     // Slight random scale / rotation / variant pick, and cluster same-variant
     // trees loosely (real forests aren't a uniform shuffle of species).
-    const s = pines ? 0.75 + rand(attempts * 3) * 0.85 : 0.65 + rand(attempts * 3) * 1.0;
+    const s = pines ? (greenMask ? 1.05 : 0.75) + rand(attempts * 3) * 0.9 : 0.65 + rand(attempts * 3) * 1.0;
     const rot = rand(attempts * 4) * Math.PI * 2;
     const clusterSeed = Math.floor(x / 40) * 13 + Math.floor(z / 40) * 7;
     const variantT = (rand(clusterSeed) * 0.7 + rand(attempts * 5) * 0.3) % 1;
@@ -1093,6 +1175,8 @@ export type RomeOptions = {
   vegetation: boolean;
   /** Cielo con nubes, neblina y luz cálida (lo aplica el visor). */
   atmosphere: boolean;
+  /** Paleta mediterránea: muros ocre/crema/terracota, tejas, techos planos sin rejilla. */
+  warmBuildings: boolean;
 };
 
 export async function buildCityMeshes(
@@ -1111,6 +1195,7 @@ export async function buildCityMeshes(
   const onProgress = options.onProgress;
   const rome = options.rome;
   group.userData.credits = CREDITS;
+  WARM = Boolean(rome?.warmBuildings);
 
   // Parallelize elevation + land-cover fetches (they are independent network work).
   // Weighted progress: elevation 0–35%, landcover 0–20% of total meshing budget.
@@ -1164,6 +1249,7 @@ export async function buildCityMeshes(
       : Promise.resolve(null);
 
   const [grid, landCoverGrid] = await Promise.all([elevPromise, coverPromise]);
+  let satCanvasForTrees: HTMLCanvasElement | null = null;
   onProgress?.(0.55, "Building terrain…");
 
   const buildingMat = new THREE.MeshStandardMaterial({
@@ -1175,9 +1261,9 @@ export async function buildCityMeshes(
   });
   if (cfg.ENABLE_WINDOWS) {
     try {
-      buildingMat.map = createWindowTexture();
+      buildingMat.map = createWindowTexture(WARM);
       buildingMat.normalMap = createWindowNormalMap();
-      buildingMat.normalScale = new THREE.Vector2(0.6, 0.6);
+      buildingMat.normalScale = new THREE.Vector2(WARM ? 0.3 : 0.6, WARM ? 0.3 : 0.6);
       buildingMat.needsUpdate = true;
     } catch (e) {
       console.warn("Window texture failed", e);
@@ -1276,6 +1362,7 @@ export async function buildCityMeshes(
     try {
       const canvas = await satPromise;
       if (canvas) {
+        satCanvasForTrees = canvas;
         const tex = new THREE.CanvasTexture(canvas);
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.anisotropy = 4;
@@ -1419,8 +1506,10 @@ export async function buildCityMeshes(
   if (cfg.ENABLE_TREES && grid && treeDensity > 0) {
     const area = (data.extent.maxX - data.extent.minX) * (data.extent.maxZ - data.extent.minZ);
     const dense = Boolean(rome?.vegetation);
-    const desired = Math.min(dense ? cfg.MAX_TREES * 1.5 : cfg.MAX_TREES, Math.floor(area * treeDensity * (dense ? 2.4 : 1)));
-    treesMesh = scatterTrees(grid, data, desired, landCoverGrid, dense) ?? undefined;
+    // Con máscara verde del satélite se sube mucho la densidad: solo cae en parques.
+    const mult = dense ? (satCanvasForTrees ? 10 : 2.4) : 1;
+    const desired = Math.min(dense ? cfg.MAX_TREES * 1.5 : cfg.MAX_TREES, Math.floor(area * treeDensity * mult));
+    treesMesh = scatterTrees(grid, data, desired, landCoverGrid, dense, satCanvasForTrees) ?? undefined;
     if (treesMesh) {
       group.add(treesMesh);
       let treeVerts = 0;

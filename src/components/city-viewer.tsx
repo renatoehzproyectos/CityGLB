@@ -238,7 +238,7 @@ export function CityViewer({
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.05;
-      renderer.shadowMap.enabled = !isMobile;
+      renderer.shadowMap.enabled = !isMobile || atmosphere;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       host.appendChild(renderer.domElement);
       renderer.domElement.style.display = "block";
@@ -265,7 +265,7 @@ export function CityViewer({
       scene.add(dir.target);
       if (renderer.shadowMap.enabled) {
         dir.castShadow = true;
-        dir.shadow.mapSize.set(2048, 2048);
+        dir.shadow.mapSize.set(isMobile ? 1024 : 2048, isMobile ? 1024 : 2048);
         const shadowSpan = Math.min(span * 0.8, 1400);
         dir.shadow.camera.left = -shadowSpan;
         dir.shadow.camera.right = shadowSpan;
