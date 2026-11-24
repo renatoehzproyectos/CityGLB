@@ -1,3 +1,4 @@
+import type { RomeOptions } from "@/lib/city/build-scene";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CityData, CityStats } from "@/lib/city/types";
 import { bboxSizeMeters } from "@/lib/city/geo";
@@ -29,6 +30,7 @@ type Props = {
   treeDensity?: number;
   satellite?: boolean;
   landCover?: boolean;
+  rome?: RomeOptions;
   onReady: (stats: CityStats) => void;
   onError: (message: string) => void;
   onExportReady: (exportFn: (() => Promise<void>) | null) => void;
@@ -42,11 +44,15 @@ export function CityViewer({
   treeDensity = 0.00008,
   satellite = false,
   landCover = false,
+  rome,
   onReady,
   onError,
   onExportReady,
   className,
 }: Props) {
+  const romeRef = useRef(rome);
+  romeRef.current = rome;
+  const romeKey = rome ? JSON.stringify(rome) : "";
   const setMeshProgress = useStudio((s) => s.setMeshProgress);
   const hostRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef(layers);
@@ -166,8 +172,15 @@ export function CityViewer({
       grad.addColorStop(1, "#eef3f2"); // horizon
       skyCtx.fillStyle = grad;
       skyCtx.fillRect(0, 0, 2, 128);
-      const skyTex = new THREE.CanvasTexture(skyCanvas);
-      skyTex.colorSpace = THREE.SRGBColorSpace;
+      const atmosphere = Boolean(romeRef.current?.atmosphere);
+      let skyTex: import("three").Texture;
+      if (atmosphere) {
+        const { createSkyTexture } = await import("@/lib/city/sky");
+        skyTex = createSkyTexture();
+      } else {
+        skyTex = new THREE.CanvasTexture(skyCanvas);
+        skyTex.colorSpace = THREE.SRGBColorSpace;
+      }
       const skyGeo = new THREE.SphereGeometry(6000, 24, 16);
       const skyMat = new THREE.MeshBasicMaterial({
         map: skyTex,
@@ -180,7 +193,8 @@ export function CityViewer({
       skyMesh.renderOrder = -10;
       scene.add(skyMesh);
       scene.background = new THREE.Color(0xdbe8ee);
-      scene.fog = new THREE.Fog(0xd7e6ea, 500, 3200);
+      scene.fog = atmosphere ? new THREE.Fog(0xe2d8c6, 700, 6000) : new THREE.Fog(0xd7e6ea, 500, 3200);
+      if (atmosphere) scene.background = new THREE.Color(0xe2d8c6);
 
       const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 8000);
       const { width, depth } = bboxSizeMeters(city.bbox);
@@ -236,10 +250,16 @@ export function CityViewer({
       renderer.domElement.style.setProperty("-webkit-touch-callout", "none");
       renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
-      const hemi = new THREE.HemisphereLight(0xcfe0ee, 0x3a342c, 0.9);
+      const hemi = atmosphere
+        ? new THREE.HemisphereLight(0xb9d0e8, 0x7a6552, 0.8)
+        : new THREE.HemisphereLight(0xcfe0ee, 0x3a342c, 0.9);
       scene.add(hemi);
-      const dir = new THREE.DirectionalLight(0xfff1e0, 1.35);
-      dir.position.set(span * 0.4, span * 0.9, span * 0.25);
+      const dir = atmosphere
+        ? new THREE.DirectionalLight(0xffe0b8, 2.1)
+        : new THREE.DirectionalLight(0xfff1e0, 1.35);
+      // Sol cálido y bajo (~30°) para sombras largas, como en el reel.
+      if (atmosphere) dir.position.set(span * 0.75, span * 0.5, span * 0.35);
+      else dir.position.set(span * 0.4, span * 0.9, span * 0.25);
       dir.target.position.set(0, 0, 0);
       scene.add(dir);
       scene.add(dir.target);
@@ -269,6 +289,7 @@ export function CityViewer({
           treeDensity: debouncedTreeDensity,
           satellite,
           landCover,
+          rome: romeRef.current,
           onProgress: (fraction, label) => setMeshProgress(fraction, label),
         });
       } catch (err) {
@@ -279,6 +300,7 @@ export function CityViewer({
         return;
       }
       scene.add(meshes.group);
+      if (meshes.labels) scene.add(meshes.labels);
 
       const applyLayers = (l: Layers) => {
         if (meshes.buildings) meshes.buildings.visible = l.buildings;
@@ -459,7 +481,7 @@ export function CityViewer({
       onExportReadyRef.current(null);
       cleanup();
     };
-  }, [city, debouncedTreeDensity, satellite, landCover]);
+  }, [city, debouncedTreeDensity, satellite, landCover, romeKey]);
 
   if (!city) {
     return (

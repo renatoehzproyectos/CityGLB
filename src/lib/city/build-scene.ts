@@ -5,6 +5,10 @@ import { bboxSizeMeters, ringArea, unproject } from "./geo";
 import type { BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
 import { fetchHeightGrid, sampleHeight, type HeightGrid } from "./elevation";
 import { buildSatelliteCanvas } from "./satellite";
+import { COLOSSEUM, ROME_LANDMARKS, ROME_STATUE_SLOTS, CREDITS } from "./rome";
+import { buildColosseum, findColosseumBuilding, type EllipseFit } from "./colosseum";
+import { project } from "./geo";
+import { applyPlanarUV, liftVertexColors, loadPolyHavenPbr } from "./pbr";
 import {
   fetchLandCoverGrid,
   buildLandCoverCanvas,
@@ -749,7 +753,7 @@ function flatTerrainGeometry(data: CityData): THREE.BufferGeometry {
 // Procedural trees: a small family of shapes (conifer / rounded broadleaf /
 // layered) so a scattered forest doesn't read as one repeated cookie-cutter
 // mesh. Trunk + volumetric canopy, colored via vertex colors for instancing.
-type TreeKind = "conifer" | "round" | "layered";
+type TreeKind = "conifer" | "round" | "layered" | "stonepine";
 
 function paintTree(merged: THREE.BufferGeometry, trunkTopY: number, canopyTint: [number, number, number]): void {
   const count = merged.getAttribute("position").count;
@@ -770,7 +774,19 @@ function paintTree(merged: THREE.BufferGeometry, trunkTopY: number, canopyTint: 
   merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
-function createTreeGeometry(kind: TreeKind, tint: [number, number, number]): THREE.BufferGeometry {
+/** three ≥0.18x: Cylinder/Cone son indexados e Icosahedron no; unifica antes de fusionar. */
+function mergeTreeParts(parts: THREE.BufferGeometry[], useGroups: boolean): THREE.BufferGeometry | null {
+  const flat = parts.map((g) => {
+    const f = g.index ? g.toNonIndexed() : g;
+    for (const name of Object.keys(f.attributes)) {
+      if (name !== "position" && name !== "normal" && name !== "uv") f.deleteAttribute(name);
+    }
+    return f;
+  });
+  return mergeGeometries(flat, useGroups);
+}
+
+export function createTreeGeometry(kind: TreeKind, tint: [number, number, number]): THREE.BufferGeometry {
   let merged: THREE.BufferGeometry;
   let trunkTop: number;
   if (kind === "conifer") {
@@ -782,16 +798,37 @@ function createTreeGeometry(kind: TreeKind, tint: [number, number, number]): THR
     c2.translate(0, 6.6, 0);
     const c3 = new THREE.ConeGeometry(0.95, 2.4, 8);
     c3.translate(0, 8.4, 0);
-    merged = mergeGeometries([trunk, c1, c2, c3], false)!;
+    merged = mergeTreeParts([trunk, c1, c2, c3], false)!;
     [trunk, c1, c2, c3].forEach((g) => g.dispose());
     trunkTop = 3.0;
+  } else if (kind === "stonepine") {
+    // Pino piñonero (Pinus pinea): tronco alto y desnudo + copa plana tipo sombrilla.
+    const trunk = new THREE.CylinderGeometry(0.34, 0.6, 9.4, 6);
+    trunk.translate(0, 4.7, 0);
+    const lobes: THREE.BufferGeometry[] = [];
+    const spots: [number, number, number, number][] = [
+      [0, 11.2, 0, 4.6],
+      [-3.1, 10.4, 1.2, 3.4],
+      [2.9, 10.7, -1.6, 3.6],
+      [0.6, 10.2, 3.2, 3.1],
+      [-0.9, 10.5, -3.3, 3.0],
+    ];
+    for (const [x, y, z, r] of spots) {
+      const g = new THREE.IcosahedronGeometry(r, 0);
+      g.scale(1, 0.42, 1);
+      g.translate(x, y, z);
+      lobes.push(g);
+    }
+    merged = mergeTreeParts([trunk, ...lobes], false)!;
+    [trunk, ...lobes].forEach((g) => g.dispose());
+    trunkTop = 8.6;
   } else if (kind === "round") {
     const trunk = new THREE.CylinderGeometry(0.26, 0.42, 3.6, 6);
     trunk.translate(0, 1.8, 0);
     const canopy = new THREE.IcosahedronGeometry(2.6, 1);
     canopy.scale(1, 0.85, 1);
     canopy.translate(0, 5.4, 0);
-    merged = mergeGeometries([trunk, canopy], false)!;
+    merged = mergeTreeParts([trunk, canopy], false)!;
     [trunk, canopy].forEach((g) => g.dispose());
     trunkTop = 3.4;
   } else {
@@ -803,7 +840,7 @@ function createTreeGeometry(kind: TreeKind, tint: [number, number, number]): THR
     lobe2.translate(1.0, 5.6, -0.4);
     const lobe3 = new THREE.IcosahedronGeometry(1.7, 0);
     lobe3.translate(0.1, 6.6, 0.7);
-    merged = mergeGeometries([trunk, lobe1, lobe2, lobe3], false)!;
+    merged = mergeTreeParts([trunk, lobe1, lobe2, lobe3], false)!;
     [trunk, lobe1, lobe2, lobe3].forEach((g) => g.dispose());
     trunkTop = 3.6;
   }
@@ -822,13 +859,41 @@ const TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
   { kind: "layered", tint: [0.29, 0.47, 0.26] },
 ];
 
+const ROME_TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
+  { kind: "stonepine", tint: [0.1, 0.24, 0.12] },
+  { kind: "stonepine", tint: [0.13, 0.29, 0.14] },
+  { kind: "stonepine", tint: [0.16, 0.32, 0.15] },
+  { kind: "stonepine", tint: [0.11, 0.26, 0.16] },
+  { kind: "round", tint: [0.22, 0.4, 0.2] },
+  { kind: "conifer", tint: [0.1, 0.25, 0.13] }, // cipreses
+];
+
+/** Ruido de valor 2D suave (0..1) para agrupar árboles en bosquecillos. */
+function valueNoise(x: number, z: number, seed: number): number {
+  const h = (ix: number, iz: number) => {
+    const v = Math.sin(ix * 127.1 + iz * 311.7 + seed * 74.7) * 43758.5453;
+    return v - Math.floor(v);
+  };
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  const fx = x - ix;
+  const fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uz = fz * fz * (3 - 2 * fz);
+  const a = h(ix, iz) * (1 - ux) + h(ix + 1, iz) * ux;
+  const b = h(ix, iz + 1) * (1 - ux) + h(ix + 1, iz + 1) * ux;
+  return a * (1 - uz) + b * uz;
+}
+
 function scatterTrees(
   grid: HeightGrid,
   data: CityData,
   count: number,
-  landCoverGrid: LandCoverGrid | null = null
+  landCoverGrid: LandCoverGrid | null = null,
+  pines = false
 ): THREE.Group | null {
   if (count <= 0) return null;
+  const variants = pines ? ROME_TREE_VARIANTS : TREE_VARIANTS;
 
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
@@ -886,7 +951,7 @@ function scatterTrees(
     }
   }
 
-  const buckets: THREE.Matrix4[][] = TREE_VARIANTS.map(() => []);
+  const buckets: THREE.Matrix4[][] = variants.map(() => []);
 
   while (placed < count && attempts < maxAttempts) {
     attempts++;
@@ -922,13 +987,19 @@ function scatterTrees(
       if (cls !== 0 && isBuiltOrWaterClass(cls)) continue;
     }
 
+    // Bosquecillos: acepta siempre dentro de manchas de ruido y rara vez fuera.
+    if (pines) {
+      const n = valueNoise(x / 90, z / 90, seed) * 0.65 + valueNoise(x / 35, z / 35, seed + 3) * 0.35;
+      if (n < 0.5 && rand(attempts * 7) > 0.1) continue;
+    }
+
     // Slight random scale / rotation / variant pick, and cluster same-variant
     // trees loosely (real forests aren't a uniform shuffle of species).
-    const s = 0.65 + rand(attempts * 3) * 1.0;
+    const s = pines ? 0.75 + rand(attempts * 3) * 0.85 : 0.65 + rand(attempts * 3) * 1.0;
     const rot = rand(attempts * 4) * Math.PI * 2;
     const clusterSeed = Math.floor(x / 40) * 13 + Math.floor(z / 40) * 7;
     const variantT = (rand(clusterSeed) * 0.7 + rand(attempts * 5) * 0.3) % 1;
-    const variantIdx = Math.min(TREE_VARIANTS.length - 1, Math.floor(variantT * TREE_VARIANTS.length));
+    const variantIdx = Math.min(variants.length - 1, Math.floor(variantT * variants.length));
 
     dummy.position.set(x, h, z);
     dummy.rotation.set(0, rot, 0);
@@ -940,10 +1011,10 @@ function scatterTrees(
 
   const group = new THREE.Group();
   group.name = "trees";
-  for (let vi = 0; vi < TREE_VARIANTS.length; vi++) {
+  for (let vi = 0; vi < variants.length; vi++) {
     const list = buckets[vi];
     if (!list.length) continue;
-    const geometry = createTreeGeometry(TREE_VARIANTS[vi].kind, TREE_VARIANTS[vi].tint);
+    const geometry = createTreeGeometry(variants[vi].kind, variants[vi].tint);
     const im = new THREE.InstancedMesh(geometry, material, list.length);
     im.castShadow = true;
     im.receiveShadow = true;
@@ -972,6 +1043,8 @@ export type CityMeshes = {
   trees?: THREE.Group;
   stats: { buildings: number; roads: number; water: number; ports: number; vertices: number; trees?: number };
   heightGrid?: HeightGrid | null;
+  /** Rótulos Cinzel (fuera de `group`, no se exportan al GLB). */
+  labels?: THREE.Group;
 };
 
 export type BuildSceneOptions = {
@@ -986,8 +1059,23 @@ export type BuildSceneOptions = {
    * `satellite` when both are enabled, and also gates where trees can grow.
    */
   landCover?: boolean;
+  /** Modo Roma: monumentos, rótulos, estatuas, PBR, SRTM, satélite HD. */
+  rome?: RomeOptions;
   /** Called with overall meshing fraction 0–1 and a stage label. */
   onProgress?: (fraction: number, label: string) => void;
+};
+
+export type RomeOptions = {
+  landmarks: boolean;
+  labels: boolean;
+  statues: boolean;
+  pbr: boolean;
+  srtm: boolean;
+  hdSatellite: boolean;
+  /** Pinos piñoneros densos y en bosquecillos. */
+  vegetation: boolean;
+  /** Cielo con nubes, neblina y luz cálida (lo aplica el visor). */
+  atmosphere: boolean;
 };
 
 export async function buildCityMeshes(
@@ -1004,6 +1092,8 @@ export async function buildCityMeshes(
   const wantSatellite = Boolean(options.satellite);
   const wantLandCover = Boolean(options.landCover);
   const onProgress = options.onProgress;
+  const rome = options.rome;
+  group.userData.credits = CREDITS;
 
   // Parallelize elevation + land-cover fetches (they are independent network work).
   // Weighted progress: elevation 0–35%, landcover 0–20% of total meshing budget.
@@ -1019,6 +1109,7 @@ export async function buildCityMeshes(
     ? fetchHeightGrid(data.bbox, data.origin, {
         targetMeters: Math.max(8, Math.min(24, (data.extent.maxX - data.extent.minX) / 96)),
         maxSamples: 140,
+        source: rome?.srtm ? "srtm" : "auto",
         onProgress: (f) => {
           elevFrac = f;
           reportFetch();
@@ -1046,7 +1137,10 @@ export async function buildCityMeshes(
   // Kick off satellite texture early so it overlaps with DEM/landcover + meshing.
   const satPromise =
     wantSatellite && !wantLandCover
-      ? buildSatelliteCanvas(data.bbox, { maxTiles: 48, targetPx: 1536 }).catch((e) => {
+      ? buildSatelliteCanvas(
+          data.bbox,
+          rome?.hdSatellite ? { maxTiles: 140, targetPx: 4096 } : { maxTiles: 48, targetPx: 1536 },
+        ).catch((e) => {
           console.warn("Satellite texture failed", e);
           return null;
         })
@@ -1197,7 +1291,38 @@ export async function buildCityMeshes(
   let treesMesh: THREE.Group | undefined;
   let treeStatsCount = 0;
 
-  const { walls: bGeo, roofs: roofGeo } = buildingsGeometry(data.buildings, grid);
+  // Colosseo procedural: sustituye el bloque extruido de OSM/Overture.
+  let buildingsForMesh = data.buildings;
+  let colosseumGroup: THREE.Group | undefined;
+  if (rome?.landmarks) {
+    const [lx, lz] = project(COLOSSEUM.lon, COLOSSEUM.lat, data.origin.lon, data.origin.lat);
+    const inside =
+      lx > data.extent.minX - 100 && lx < data.extent.maxX + 100 && lz > data.extent.minZ - 100 && lz < data.extent.maxZ + 100;
+    if (inside) {
+      const found = findColosseumBuilding(data.buildings, lx, lz);
+      let fit: EllipseFit;
+      if (found) {
+        fit = found.fit;
+        buildingsForMesh = data.buildings.filter((_, i) => i !== found.index);
+      } else {
+        console.warn("[rome] Colosseo no encontrado en los datos; se usa posición y orientación aproximadas.");
+        const bearing = (COLOSSEUM.fallbackBearingDeg * Math.PI) / 180;
+        fit = { cx: lx, cz: lz, a: COLOSSEUM.semiMajor, b: COLOSSEUM.semiMinor, angle: Math.atan2(-Math.cos(bearing), Math.sin(bearing)) };
+      }
+      const ring: [number, number][] = [];
+      for (let k = 0; k < 24; k++) {
+        const t = (k / 24) * Math.PI * 2;
+        ring.push([fit.cx + Math.cos(t) * fit.a * Math.cos(fit.angle) - Math.sin(t) * fit.b * Math.sin(fit.angle),
+                   fit.cz + Math.cos(t) * fit.a * Math.sin(fit.angle) + Math.sin(t) * fit.b * Math.cos(fit.angle)]);
+      }
+      const baseY = (grid ? footprintMinHeight(grid, ring) : 0) - 0.3;
+      colosseumGroup = buildColosseum({ fit, baseY });
+      group.add(colosseumGroup);
+      vertices += 40000;
+    }
+  }
+
+  const { walls: bGeo, roofs: roofGeo } = buildingsGeometry(buildingsForMesh, grid);
   if (bGeo) {
     buildingsMesh = new THREE.Mesh(bGeo, buildingMat);
     buildingsMesh.name = "buildings";
@@ -1249,6 +1374,20 @@ export async function buildCityMeshes(
   onProgress?.(0.85, "Meshing roads…");
 
   const rGeo = roadsGeometry(data.roads, grid);
+  if (rGeo && rome?.pbr) {
+    const pbr = await loadPolyHavenPbr("cobblestone_floor_001", 1 / 2);
+    if (pbr) {
+      applyPlanarUV(rGeo, 2.2);
+      liftVertexColors(rGeo, 2.6);
+      roadMat.map = pbr.map;
+      roadMat.normalMap = pbr.normalMap;
+      roadMat.normalScale = new THREE.Vector2(0.9, 0.9);
+      roadMat.roughnessMap = pbr.roughnessMap;
+      roadMat.roughness = 1;
+      roadMat.flatShading = false;
+      roadMat.needsUpdate = true;
+    }
+  }
   if (rGeo) {
     roadsMesh = new THREE.Mesh(rGeo, roadMat);
     roadsMesh.name = "roads";
@@ -1262,8 +1401,9 @@ export async function buildCityMeshes(
   // Trees
   if (cfg.ENABLE_TREES && grid && treeDensity > 0) {
     const area = (data.extent.maxX - data.extent.minX) * (data.extent.maxZ - data.extent.minZ);
-    const desired = Math.min(cfg.MAX_TREES, Math.floor(area * treeDensity));
-    treesMesh = scatterTrees(grid, data, desired, landCoverGrid) ?? undefined;
+    const dense = Boolean(rome?.vegetation);
+    const desired = Math.min(dense ? cfg.MAX_TREES * 1.5 : cfg.MAX_TREES, Math.floor(area * treeDensity * (dense ? 2.4 : 1)));
+    treesMesh = scatterTrees(grid, data, desired, landCoverGrid, dense) ?? undefined;
     if (treesMesh) {
       group.add(treesMesh);
       let treeVerts = 0;
@@ -1278,6 +1418,35 @@ export async function buildCityMeshes(
       vertices += treeVerts;
       treeStatsCount = treeCount;
     }
+  }
+
+  const groundAt = (x: number, z: number) => (grid ? heightAtFeature(grid, x, z) : 0);
+  const inExtent = (x: number, z: number) =>
+    x > data.extent.minX && x < data.extent.maxX && z > data.extent.minZ && z < data.extent.maxZ;
+
+  if (rome?.statues) {
+    onProgress?.(0.96, "Placing statues…");
+    const { buildStatues } = await import("./statues");
+    const slots = ROME_STATUE_SLOTS.map((sl) => {
+      const [x, z] = project(sl.lon, sl.lat, data.origin.lon, data.origin.lat);
+      return { ...sl, x, z, groundY: groundAt(x, z) };
+    }).filter((sl) => inExtent(sl.x, sl.z));
+    if (slots.length) {
+      const { group: sg, placed } = await buildStatues(slots);
+      if (placed > 0) group.add(sg);
+      else console.info("[rome] Sin estatuas: coloca GLB en public/models/statues/ (ver README).");
+    }
+  }
+
+  let labelsGroup: THREE.Group | undefined;
+  if (rome?.labels) {
+    onProgress?.(0.98, "Lettering…");
+    const { buildLabels } = await import("./labels");
+    const items = ROME_LANDMARKS.map((lm) => {
+      const [x, z] = project(lm.lon, lm.lat, data.origin.lon, data.origin.lat);
+      return { text: lm.label, x, z, groundY: groundAt(x, z), height: lm.labelHeight };
+    }).filter((it) => inExtent(it.x, it.z));
+    if (items.length) labelsGroup = await buildLabels(items);
   }
 
   onProgress?.(0.99, "Finalizing…");
@@ -1301,6 +1470,7 @@ export async function buildCityMeshes(
       trees: treeStatsCount,
     },
     heightGrid: grid,
+    labels: labelsGroup,
   };
 }
 

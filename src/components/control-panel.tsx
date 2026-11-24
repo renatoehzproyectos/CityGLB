@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { CREDITS, ROME_PRESETS } from "@/lib/city/rome";
 import { Switch } from "@/components/ui/switch";
 import { bboxSizeMeters, formatSpan, validateBBox } from "@/lib/city/geo";
 import { cityFilename } from "@/lib/city/filename";
@@ -32,6 +33,9 @@ export function ControlPanel({ exportFn }: Props) {
   const treeDensity = useStudio((s) => s.treeDensity);
   const satellite = useStudio((s) => s.satellite);
   const landCover = useStudio((s) => s.landCover);
+  const rome = useStudio((s) => s.rome);
+  const setRome = useStudio((s) => s.setRome);
+  const setRomeMode = useStudio((s) => s.setRomeMode);
   const searchQuery = useStudio((s) => s.searchQuery);
   const searchResults = useStudio((s) => s.searchResults);
   const searching = useStudio((s) => s.searching);
@@ -281,6 +285,39 @@ export function ControlPanel({ exportFn }: Props) {
                 <p className="text-[10px] leading-snug text-subtle">
                   Esri World Imagery · no API key · remeshes the scene
                 </p>
+                <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3">
+                  <Label>Roma</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ROME_PRESETS.map((p) => (
+                      <Button
+                        key={p.id}
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setBbox(p.bbox, `${p.name}, ${p.city}`);
+                          setRomeMode(true);
+                        }}
+                      >
+                        {p.name}
+                      </Button>
+                    ))}
+                  </div>
+                  <RowSwitch
+                    label="Modo Roma"
+                    checked={Object.values(rome).every(Boolean)}
+                    onCheckedChange={setRomeMode}
+                  />
+                  <RowSwitch label="Colosseo 3D" checked={rome.landmarks} onCheckedChange={(on) => setRome({ landmarks: on })} />
+                  <RowSwitch label="Rótulos Cinzel" checked={rome.labels} onCheckedChange={(on) => setRome({ labels: on })} />
+                  <RowSwitch label="Estatuas" checked={rome.statues} onCheckedChange={(on) => setRome({ statues: on })} />
+                  <RowSwitch label="Calles PBR (Poly Haven)" checked={rome.pbr} onCheckedChange={(on) => setRome({ pbr: on })} />
+                  <RowSwitch label="Elevación NASA SRTM" checked={rome.srtm} onCheckedChange={(on) => setRome({ srtm: on })} />
+                  <RowSwitch label="Pinos piñoneros densos" checked={rome.vegetation} onCheckedChange={(on) => setRome({ vegetation: on })} />
+                  <RowSwitch label="Cielo con nubes y luz cálida" checked={rome.atmosphere} onCheckedChange={(on) => setRome({ atmosphere: on })} />
+                  <RowSwitch label="Satélite HD (4096 px)" checked={rome.hdSatellite} onCheckedChange={(on) => setRome({ hdSatellite: on })} />
+                  <p className="text-[10px] leading-snug text-subtle">{CREDITS}</p>
+                </div>
               </section>
             </>
           )}

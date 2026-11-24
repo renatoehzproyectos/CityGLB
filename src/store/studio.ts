@@ -3,6 +3,7 @@ import { fetchOvertureLayerFn } from "@/lib/city/fetch-overture";
 import { bboxFromCenter, bboxSizeMeters, formatSpan, normalizeBBox, validateBBox } from "@/lib/city/geo";
 import { cfg } from "@/lib/city/config";
 import { DEFAULT_PRESET } from "@/lib/city/presets";
+import type { RomeOptions } from "@/lib/city/build-scene";
 import type { BBox, CityData, CityStats, PlaceHit, StudioStatus } from "@/lib/city/types";
 import { searchPlaces } from "@/lib/city/fetch-city";
 
@@ -40,6 +41,11 @@ type StudioState = {
    * `satellite` and also gates where trees can be placed.
    */
   landCover: boolean;
+  /** Modo Roma: monumentos, Cinzel, estatuas, PBR, SRTM, satélite HD. */
+  rome: RomeOptions;
+  setRome: (partial: Partial<RomeOptions>) => void;
+  /** Activa todo el modo Roma (y satélite). */
+  setRomeMode: (on: boolean) => void;
   searchQuery: string;
   searchResults: PlaceHit[];
   searching: boolean;
@@ -68,6 +74,9 @@ type StudioState = {
   setMeshProgress: (fraction: number, label: string) => void;
 };
 
+const ROME_OFF: RomeOptions = { landmarks: false, labels: false, statues: false, pbr: false, srtm: false, hdSatellite: false, vegetation: false, atmosphere: false };
+const ROME_ON: RomeOptions = { landmarks: true, labels: true, statues: true, pbr: true, srtm: true, hdSatellite: true, vegetation: true, atmosphere: true };
+
 function spanOf(bbox: BBox): number {
   const { width, depth } = bboxSizeMeters(bbox);
   return Math.max(width, depth);
@@ -91,6 +100,14 @@ export const useStudio = create<StudioState>((set, get) => ({
   treeDensity: cfg.TREE_DENSITY,
   satellite: false,
   landCover: false,
+  rome: ROME_OFF,
+  setRome: (partial) => set((s) => ({ rome: { ...s.rome, ...partial } })),
+  setRomeMode: (on) =>
+    set((s) => ({
+      rome: on ? ROME_ON : ROME_OFF,
+      satellite: on ? true : s.satellite,
+      landCover: on ? false : s.landCover,
+    })),
   searchQuery: "",
   searchResults: [],
   searching: false,

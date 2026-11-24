@@ -19,6 +19,7 @@ export function StudioShell() {
   const treeDensity = useStudio((s) => s.treeDensity);
   const satellite = useStudio((s) => s.satellite);
   const landCover = useStudio((s) => s.landCover);
+  const rome = useStudio((s) => s.rome);
   const progress = useStudio((s) => s.progress);
   const progressLabel = useStudio((s) => s.progressLabel);
   const setReady = useStudio((s) => s.setReady);
@@ -64,6 +65,7 @@ export function StudioShell() {
                 treeDensity={treeDensity}
                 satellite={satellite}
                 landCover={landCover}
+                rome={rome}
                 onReady={setReady}
                 onError={setMeshError}
                 onExportReady={setExportFn}

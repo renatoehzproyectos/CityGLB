@@ -10,6 +10,7 @@
  */
 import { fromUrl, type GeoTIFF, type GeoTIFFImage } from "geotiff";
 import type { BBox } from "./types";
+import { loadSrtmTile, sampleSrtm, type SrtmTile } from "./srtm";
 
 const DEM_BUCKET = "https://copernicus-dem-30m.s3.amazonaws.com";
 
@@ -101,6 +102,8 @@ export async function fetchHeightGrid(
   options: {
     targetMeters?: number;
     maxSamples?: number;
+    /** "srtm" = NASA SRTM 1" (cae a Copernicus/Terrarium si falla). */
+    source?: "srtm" | "auto";
     /** Called with fraction 0–1 as work completes. */
     onProgress?: (fraction: number) => void;
   } = {}
@@ -123,6 +126,41 @@ export async function fetchHeightGrid(
   const xs = new Float32Array(cols);
   const zs = new Float32Array(rows);
   const data = new Float32Array(cols * rows);
+
+  if (options.source === "srtm") {
+    const need = new Set<string>();
+    for (let j = 0; j < rows; j++) {
+      const lat = bbox.minLat + (j / (rows - 1 || 1)) * (bbox.maxLat - bbox.minLat);
+      for (const lon of [bbox.minLon, bbox.maxLon]) need.add(`${Math.floor(lat)}/${Math.floor(lon)}`);
+    }
+    const tiles = new Map<string, SrtmTile | null>();
+    await Promise.all(
+      Array.from(need).map(async (k) => {
+        const [la, lo] = k.split("/").map(Number);
+        tiles.set(k, await loadSrtmTile(la, lo));
+        onProgress?.(0.5 * (tiles.size / need.size));
+      })
+    );
+    if (Array.from(tiles.values()).every((t) => t)) {
+      let sMin = Infinity;
+      let sMax = -Infinity;
+      for (let j = 0; j < rows; j++) {
+        const lat = bbox.minLat + (j / (rows - 1 || 1)) * (bbox.maxLat - bbox.minLat);
+        zs[j] = (lat - origin.lat) * mPerDegLat;
+        for (let i = 0; i < cols; i++) {
+          const lon = bbox.minLon + (i / (cols - 1 || 1)) * (bbox.maxLon - bbox.minLon);
+          xs[i] = (lon - origin.lon) * mPerDegLon;
+          const h = sampleSrtm(tiles, lon, lat) ?? 0;
+          data[j * cols + i] = h;
+          if (h < sMin) sMin = h;
+          if (h > sMax) sMax = h;
+        }
+      }
+      onProgress?.(1);
+      return { width: cols, height: rows, data, xs, zs, minH: sMin, maxH: sMax, originLon: origin.lon, originLat: origin.lat };
+    }
+    console.warn("[elevation] SRTM no disponible — usando Copernicus/Terrarium.");
+  }
 
   type Sample = { i: number; j: number; lon: number; lat: number; tileLat: number; tileLon: number };
   const samples: Sample[] = [];
