@@ -63,6 +63,65 @@ function cacheSet<T>(key: string, data: T): void {
   overtureCache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 
+
+// ---------------------------------------------------------------------------
+// Release discovery. Overture retira releases antiguos del bucket, así que la
+// constante OVERTURE_RELEASE puede dejar de existir. Si no tiene archivos,
+// se busca el release más reciente que sí los tenga.
+// ---------------------------------------------------------------------------
+const RELEASE_RE = /^\d{4}-\d{2}-\d{2}\.\d+$/;
+const RELEASE_CACHE_TTL_MS = 60 * 60 * 1000;
+let resolvedRelease: { preferred: string; value: string; expiresAt: number } | null = null;
+
+async function releaseHasBuildings(release: string): Promise<boolean> {
+  const url = new URL(OVERTURE_S3_HTTP);
+  url.searchParams.set("list-type", "2");
+  url.searchParams.set("prefix", `release/${release}/theme=buildings/type=building/`);
+  url.searchParams.set("max-keys", "1");
+  try {
+    const res = await fetch(url.toString());
+    if (!res.ok) return false;
+    return /<Key>[^<]+\.parquet<\/Key>/.test(await res.text());
+  } catch {
+    return false;
+  }
+}
+
+async function listOvertureReleases(): Promise<string[]> {
+  const url = new URL(OVERTURE_S3_HTTP);
+  url.searchParams.set("list-type", "2");
+  url.searchParams.set("prefix", "release/");
+  url.searchParams.set("delimiter", "/");
+  const res = await fetch(url.toString());
+  if (!res.ok) return [];
+  const xml = await res.text();
+  const out: string[] = [];
+  for (const m of xml.matchAll(/<Prefix>release\/([^/<]+)\/<\/Prefix>/g)) {
+    if (RELEASE_RE.test(m[1])) out.push(m[1]);
+  }
+  return out.sort().reverse();
+}
+
+async function resolveRelease(preferred: string): Promise<string> {
+  const now = Date.now();
+  if (resolvedRelease && resolvedRelease.preferred === preferred && resolvedRelease.expiresAt > now) {
+    return resolvedRelease.value;
+  }
+  let value = preferred;
+  if (!(await releaseHasBuildings(preferred))) {
+    const releases = await listOvertureReleases();
+    for (const r of releases.slice(0, 6)) {
+      if (await releaseHasBuildings(r)) {
+        console.warn(`[overture] release ${preferred} no existe; usando ${r}`);
+        value = r;
+        break;
+      }
+    }
+  }
+  resolvedRelease = { preferred, value, expiresAt: now + RELEASE_CACHE_TTL_MS };
+  return value;
+}
+
 type PartitionFile = { key: string; size: number; partIndex: number };
 
 /** Extract part index from keys like `.../part-00042-uuid-c000.zstd.parquet`. */
@@ -261,6 +320,7 @@ function asGeoJsonGeometry(value: unknown): { type: string; coordinates: unknown
 }
 
 async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): Promise<OvertureBuildingCollection> {
+  release = await resolveRelease(release);
   const key = cacheKey("buildings", bbox, release);
   const cached = cacheGet<OvertureBuildingCollection>(key);
   if (cached) return cached;
@@ -299,6 +359,7 @@ async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): P
 }
 
 async function queryOvertureSegments(bbox: BBox, release = OVERTURE_RELEASE): Promise<OvertureSegmentCollection> {
+  release = await resolveRelease(release);
   const key = cacheKey("segments", bbox, release);
   const cached = cacheGet<OvertureSegmentCollection>(key);
   if (cached) return cached;
@@ -334,6 +395,7 @@ async function queryOvertureSegments(bbox: BBox, release = OVERTURE_RELEASE): Pr
 }
 
 async function queryOvertureWater(bbox: BBox, release = OVERTURE_RELEASE): Promise<OvertureWaterCollection> {
+  release = await resolveRelease(release);
   const key = cacheKey("water", bbox, release);
   const cached = cacheGet<OvertureWaterCollection>(key);
   if (cached) return cached;

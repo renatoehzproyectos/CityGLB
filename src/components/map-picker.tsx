@@ -38,14 +38,23 @@ export function MapPicker({ bbox, boxSizeM, focusSerial, onBbox, className }: Pr
         zoomControl: false,
         attributionControl: true,
         minZoom: 3,
-        maxZoom: 18,
+        maxZoom: 19,
       });
       L.control.zoom({ position: "bottomright" }).addTo(map);
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-        attribution: "&copy; OpenStreetMap &copy; CARTO",
-        subdomains: "abcd",
-        maxZoom: 19,
-      }).addTo(map);
+      // Imagen satelital gratuita (Esri World Imagery), sin API key.
+      L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        {
+          attribution: "Imágenes: Esri, Vantor, Earthstar Geographics, GIS User Community",
+          maxNativeZoom: 19,
+          maxZoom: 19,
+        },
+      ).addTo(map);
+      // Etiquetas de lugares y límites (también gratis, sin key).
+      L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        { maxNativeZoom: 19, maxZoom: 19, opacity: 0.9 },
+      ).addTo(map);
 
       const b = bbox;
       const bounds = L.latLngBounds([b.minLat, b.minLon], [b.maxLat, b.maxLon]);
