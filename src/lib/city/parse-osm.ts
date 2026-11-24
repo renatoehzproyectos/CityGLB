@@ -1,6 +1,7 @@
 import { cfg } from "./config";
 import { bboxCenter, pathLength, project, ringArea, roundMeters } from "./geo";
 import { clampHeight, estimateHeight, hash01 } from "./height";
+import { facadeFromProps, roofFromProps } from "./roof-data";
 import { simplifyRing, uniqueRing } from "./simplify";
 import type { BBox, BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
 
@@ -153,6 +154,14 @@ export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts:
       holes,
       height: jitterDefaultHeight(id, estimateHeight(tags), tags),
       kind,
+      roof: roofFromProps({
+        shape: tags?.["roof:shape"], color: tags?.["roof:colour"] ?? tags?.["roof:color"],
+        material: tags?.["roof:material"], height: tags?.["roof:height"], direction: tags?.["roof:direction"],
+      }),
+      facade: facadeFromProps(
+        tags?.["building:colour"] ?? tags?.["building:color"],
+        tags?.["building:material"] ?? tags?.["building:facade:material"],
+      ),
     });
   };
 

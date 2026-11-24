@@ -12,6 +12,10 @@ export type BuildingFeature = {
   holes: Ring[];
   height: number;
   kind: string;
+  /** Datos reales de techo (Overture/OSM) cuando existen. */
+  roof?: import("./roof-data").RoofInfo;
+  /** Color de fachada real (color o material) cuando existe. */
+  facade?: import("./roof-data").RGB;
 };
 
 export type RoadFeature = {

@@ -340,14 +340,16 @@ async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): P
   const cached = cacheGet<OvertureBuildingCollection>(key);
   if (cached) return cached;
 
-  const rows = await runOvertureQuery(
-    "buildings",
-    "building",
-    release,
-    ["id", "height", "num_floors", "class", "subtype", "names", "geometry"],
-    bbox,
-    cfg.MAX_BUILDINGS * 2,
-  );
+  const baseCols = ["id", "height", "num_floors", "class", "subtype", "names", "geometry"];
+  const extraCols = ["facade_color", "facade_material", "roof_shape", "roof_color", "roof_material", "roof_height", "roof_direction"];
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await runOvertureQuery("buildings", "building", release, [...baseCols, ...extraCols], bbox, cfg.MAX_BUILDINGS * 2);
+  } catch (e) {
+    // Releases antiguos pueden no tener las columnas de techo/fachada: reintenta con las básicas.
+    console.warn("[overture] columnas de techo/fachada no disponibles; reintentando sin ellas", e);
+    rows = await runOvertureQuery("buildings", "building", release, baseCols, bbox, cfg.MAX_BUILDINGS * 2);
+  }
 
   const features: OvertureBuildingCollection["features"] = [];
   for (const row of rows) {
@@ -365,6 +367,13 @@ async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): P
         class: (row.class as string | null) ?? null,
         subtype: (row.subtype as string | null) ?? null,
         names: { primary: names?.primary ?? null },
+        facade_color: (row.facade_color as string | null) ?? null,
+        facade_material: (row.facade_material as string | null) ?? null,
+        roof_shape: (row.roof_shape as string | null) ?? null,
+        roof_color: (row.roof_color as string | null) ?? null,
+        roof_material: (row.roof_material as string | null) ?? null,
+        roof_height: (row.roof_height as number | null) ?? null,
+        roof_direction: (row.roof_direction as number | null) ?? null,
       },
     });
   }

@@ -11,6 +11,7 @@ import {
   roundMeters,
 } from "./geo";
 import { clampHeight } from "./height";
+import { facadeFromProps, roofFromProps } from "./roof-data";
 import { simplifyRing, uniqueRing } from "./simplify";
 import type { BBox, BuildingFeature, CityData, RoadFeature, WaterFeature } from "./types";
 
@@ -29,6 +30,13 @@ export type OvertureBuildingProps = {
   class?: string | null;
   subtype?: string | null;
   names?: { primary?: string | null } | null;
+  facade_color?: string | null;
+  facade_material?: string | null;
+  roof_shape?: string | null;
+  roof_color?: string | null;
+  roof_material?: string | null;
+  roof_height?: number | null;
+  roof_direction?: number | null;
 };
 
 export type OvertureSegmentProps = {
@@ -182,7 +190,14 @@ export function overtureBuildingsToFeatures(
 
       const height =
         known ?? clampHeight(estimatedHeight(kind, area, ring[0][0] * 7.31 + ring[0][1] * 3.17));
-      out.push({ ring, holes, height, kind });
+      out.push({
+        ring, holes, height, kind,
+        roof: roofFromProps({
+          shape: props.roof_shape, color: props.roof_color, material: props.roof_material,
+          height: props.roof_height, direction: props.roof_direction,
+        }),
+        facade: facadeFromProps(props.facade_color, props.facade_material),
+      });
     }
   }
 
@@ -296,7 +311,7 @@ export function overtureToCityData(
       const ch = clipPolygonToBox(h, box);
       if (ch && ringArea(ch) > 4) holes.push(ch);
     }
-    buildings.push({ ring: clipped, holes, height: b.height, kind: b.kind });
+    buildings.push({ ring: clipped, holes, height: b.height, kind: b.kind, roof: b.roof, facade: b.facade });
   }
 
   const roads: RoadFeature[] = [];

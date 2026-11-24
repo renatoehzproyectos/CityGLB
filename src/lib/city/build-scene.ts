@@ -5,6 +5,8 @@ import { bboxSizeMeters, ringArea, unproject } from "./geo";
 import type { BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
 import { fetchHeightGrid, sampleHeight, type HeightGrid } from "./elevation";
 import { buildSatelliteCanvas } from "./satellite";
+import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
+import type { RGB, RoofShape } from "./roof-data";
 import { COLOSSEUM, ROME_LANDMARKS, ROME_STATUE_SLOTS, CREDITS } from "./rome";
 import { buildColosseum, findColosseumBuilding, type EllipseFit } from "./colosseum";
 import { project } from "./geo";
@@ -147,6 +149,7 @@ function regionTreeStyle(lat: number, lon: number): "mediterranean" | "tropical"
 
 /** Individualized facade color: palette variant per kind, shaded slightly by height. */
 function buildingColor(b: BuildingFeature): [number, number, number] {
+  if (b.facade) return b.facade;
   if (WARM) {
     const w = pickVariant(FACADES, buildingHash(b));
     const th = Math.min(1, Math.max(0, (b.height - 8) / 80));
@@ -279,43 +282,62 @@ function drapeOntoTerrain(
  * arbitrary polygons (no straight-skeleton needed) and reads as a proper
  * pitched roof from any angle, unlike a flat extrusion cap.
  */
-function roofGeometry(b: BuildingFeature): THREE.BufferGeometry | null {
-  const ring = closedRing(b.ring);
-  if (ring.length < 3) return null;
-  const [cx, cz] = centroid(ring);
-  const area = ringArea(ring);
-  const r = Math.sqrt(Math.max(area, 1) / Math.PI);
-  const rise = Math.min(cfg.ROOF_RISE_MAX, Math.max(cfg.ROOF_RISE_MIN, r * 0.32));
+const isTerracotta = (c: RGB) => c[0] > c[1] * 1.18 && c[0] > c[2] * 1.35;
 
-  const n = ring.length;
-  const positions: number[] = [];
-  const indices: number[] = [];
-
-  // Eave ring (x, 0, z) — overhangs the wall slightly for an eave shadow line.
-  for (let i = 0; i < n; i++) {
-    const [x, z] = ring[i];
-    let ex = x - cx;
-    let ez = z - cz;
-    const len = Math.hypot(ex, ez) || 1;
-    ex = x + (ex / len) * cfg.ROOF_INSET;
-    ez = z + (ez / len) * cfg.ROOF_INSET;
-    positions.push(ex, 0, ez);
+/** Color de techo observado en el satélite bajo la huella (evita sombras y copas de árboles). */
+function sampleRoofColor(o: OBB, sampler: RoofSampler): RGB | null {
+  const vx = -o.uz, vz = o.ux;
+  const offs: [number, number][] = [[0, 0], [0.45, 0], [-0.45, 0], [0, 0.45], [0, -0.45]];
+  let best: RGB | null = null, bestL = -1;
+  for (const [fu, fv] of offs) {
+    const u = fu * o.a, v = fv * o.c;
+    const c = sampler(o.cx + u * o.ux + v * vx, o.cz + u * o.uz + v * vz);
+    if (!c) continue;
+    if (c[1] > c[0] * 1.04 && c[1] > c[2]) continue; // vegetación sobre la huella
+    const l = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11;
+    if (l > bestL) { bestL = l; best = c; }
   }
-  // Apex
-  const apexIdx = n;
-  positions.push(cx, rise, cz);
+  return best;
+}
 
-  for (let i = 0; i < n; i++) {
-    const a = i;
-    const bI = (i + 1) % n;
-    indices.push(a, apexIdx, bI);
+function resolveRoofColor(b: BuildingFeature, sat: RGB | null): RGB {
+  if (b.roof?.color) return b.roof.color;
+  const pal = roofColor(b);
+  if (!sat) return pal;
+  // La imagen ya trae luz y sombra: se aclara un poco y se mezcla con la paleta.
+  const k = 1.18;
+  return [
+    Math.min(1, sat[0] * k) * 0.8 + pal[0] * 0.2,
+    Math.min(1, sat[1] * k) * 0.8 + pal[1] * 0.2,
+    Math.min(1, sat[2] * k) * 0.8 + pal[2] * 0.2,
+  ];
+}
+
+function planRoof(b: BuildingFeature, o: OBB, sat: RGB | null): { shape: RoofShape; rise: number } {
+  const area = ringArea(b.ring);
+  const rectLike = o.fill >= 0.8 && !b.holes.length;
+  const convex = !b.holes.length && isConvex(b.ring);
+  const r = Math.sqrt(area / Math.PI);
+  let shape: RoofShape = "flat";
+  const explicit = b.roof?.shape;
+  if (explicit) {
+    shape = explicit;
+    if ((shape === "gabled" || shape === "hipped") && !rectLike) shape = convex ? "pyramidal" : "flat";
+    if ((shape === "pyramidal" || shape === "dome") && !convex) shape = "flat";
+  } else if (b.height <= 26 && area >= 20 && !b.holes.length) {
+    const prob = sat ? (isTerracotta(sat) ? 1 : 0.12) : WARM ? 0.7 : 0.45;
+    if (buildingHash(b) < prob) {
+      if (rectLike) shape = area < 260 ? "gabled" : "hipped";
+      else if (convex) shape = "pyramidal";
+    }
   }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  return geo;
+  let rise = b.roof?.height;
+  if (rise == null) {
+    rise = shape === "dome" ? Math.min(14, Math.max(2, r * 0.7))
+      : shape === "pyramidal" ? Math.min(5, Math.max(1.2, r * 0.35))
+      : Math.min(5.5, Math.max(1.4, o.c * 0.5));
+  }
+  return { shape, rise };
 }
 
 /**
@@ -352,7 +374,8 @@ function roofClutterGeometry(b: BuildingFeature): THREE.BufferGeometry | null {
 
 function buildingsGeometry(
   features: BuildingFeature[],
-  grid: HeightGrid | null
+  grid: HeightGrid | null,
+  sampler: RoofSampler | null = null
 ): { walls: THREE.BufferGeometry | null; roofs: THREE.BufferGeometry | null } {
   const wallGeos: THREE.BufferGeometry[] = [];
   const roofGeos: THREE.BufferGeometry[] = [];
@@ -379,15 +402,27 @@ function buildingsGeometry(
         col0.setXYZ(i, col0.getX(i) * f, col0.getY(i) * f, col0.getZ(i) * f);
       }
     }
+    // Techo: forma/color reales (Overture/OSM) o inferidos del satélite y de la huella.
+    const ob = computeOBB(b.ring, b.roof?.dir);
+    const sat = ob && sampler ? sampleRoofColor(ob, sampler) : null;
+    const roofCol = resolveRoofColor(b, sat);
+    let rGeo: THREE.BufferGeometry | null = null;
+    if (cfg.ENABLE_ROOFS && ob) {
+      const plan = planRoof(b, ob, sat);
+      if (plan.shape === "gabled" || plan.shape === "hipped") rGeo = ridgeRoof(plan.shape, ob, plan.rise, 0.5);
+      else if (plan.shape === "pyramidal") rGeo = fanRoof(b.ring, plan.rise, false, 0.5);
+      else if (plan.shape === "dome") rGeo = fanRoof(b.ring, plan.rise, true, 0);
+    }
+
     // Las tapas (normal ±Y) heredaban UV en metros y mostraban la rejilla de ventanas
-    // sobre los techos. Las apuntamos a una zona lisa de la textura y, en modo cálido,
-    // las pintamos como azotea.
+    // sobre los techos. Las apuntamos a una zona lisa de la textura y, si el techo es
+    // plano, las pintamos con el color real/observado de la azotea.
     {
       const nrm = geo.getAttribute("normal");
       const uv = geo.getAttribute("uv");
       const col = geo.getAttribute("color");
       if (nrm && uv) {
-        const flat = WARM ? WARM_FLAT_ROOF : null;
+        const flat: RGB | null = rGeo ? null : sat || b.roof?.color || WARM ? roofCol : null;
         for (let i = 0; i < nrm.count; i++) {
           if (Math.abs(nrm.getY(i)) > 0.9) {
             uv.setXY(i, 0.03, 0.03);
@@ -400,15 +435,13 @@ function buildingsGeometry(
     }
     wallGeos.push(geo);
 
-    if (cfg.ENABLE_ROOFS && b.height <= (WARM ? 60 : cfg.ROOF_MAX_HEIGHT_FOR_PITCH) && !b.holes.length) {
-      const rGeo = roofGeometry(b);
-      if (rGeo) {
-        rGeo.translate(0, baseY + b.height, 0);
-        paintGeometry(rGeo, roofColor(b));
-        roofGeos.push(rGeo);
-      }
+    if (rGeo) {
+      rGeo.translate(0, baseY + b.height, 0);
+      const j = 0.94 + ((buildingHash(b) * 7.7) % 1) * 0.12; // variación tejado a tejado
+      paintGeometry(rGeo, [roofCol[0] * j, roofCol[1] * j, roofCol[2] * j]);
+      roofGeos.push(rGeo);
     } else {
-      // Flat-roofed / tall buildings get rooftop clutter instead of a pitch.
+      // Azotea plana: pequeños equipos en el techo.
       const clutter = roofClutterGeometry(b);
       if (clutter) {
         clutter.translate(0, baseY + b.height, 0);
@@ -1499,7 +1532,8 @@ export async function buildCityMeshes(
     }
   }
 
-  const { walls: bGeo, roofs: roofGeo } = buildingsGeometry(buildingsForMesh, grid);
+  const roofSampler = satCanvasForTrees ? createRoofSampler(satCanvasForTrees, data.extent) : null;
+  const { walls: bGeo, roofs: roofGeo } = buildingsGeometry(buildingsForMesh, grid, roofSampler);
   if (bGeo) {
     buildingsMesh = new THREE.Mesh(bGeo, buildingMat);
     buildingsMesh.name = "buildings";
