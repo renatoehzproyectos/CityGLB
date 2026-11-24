@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { normalizeBBox, validateBBox } from "./geo";
+import { cfg } from "./config";
 import {
   OVERTURE_RELEASE,
   overtureToCityData,
@@ -33,7 +34,7 @@ async function getQueryOvertureFiles() {
 }
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
-const CACHE_MAX_ENTRIES = 300;
+const CACHE_MAX_ENTRIES = 12; // entradas grandes (decenas de MB): pocas
 
 type CacheEntry = { data: unknown; expiresAt: number };
 const overtureCache = new Map<string, CacheEntry>();
@@ -228,9 +229,13 @@ async function getStacFileBBoxes(theme: string, type: string, release: string): 
     // extent.spatial.bbox[0] is sometimes the overall union in STAC — but for
     // Overture, all entries are per-file and match item count. Prefer item count.
     const itemCount = (collection.links ?? []).filter((l) => l.rel === "item").length;
-    const index: StacIndex = {
-      bboxes: itemCount > 0 && bboxes.length === itemCount ? bboxes : bboxes,
-    };
+    // Si el nº de bboxes no coincide con el nº de ítems, el orden NO es fiable:
+    // podar con él puede descartar justo los archivos de la zona (→ 0 edificios).
+    if (itemCount === 0 || bboxes.length !== itemCount) {
+      console.warn(`[overture] STAC bboxes (${bboxes.length}) != items (${itemCount}); sin poda`);
+      return null;
+    }
+    const index: StacIndex = { bboxes };
     stacCache.set(cacheKey, { index, expiresAt: Date.now() + STAC_CACHE_TTL_MS });
     return index;
   } catch (err) {
@@ -303,13 +308,23 @@ async function runOvertureQuery(
     ? { $and: [bboxIntersectFilter(bbox), extraFilter] }
     : bboxIntersectFilter(bbox);
 
-  return queryOvertureFiles({
-    urls: files.map((f) => toHttpsUrl(f.key)),
-    byteLengths: files.map((f) => f.size),
-    columns,
-    filter,
-    rowLimit,
-  });
+  const run = (list: PartitionFile[]) =>
+    queryOvertureFiles({
+      urls: list.map((f) => toHttpsUrl(f.key)),
+      byteLengths: list.map((f) => f.size),
+      columns,
+      filter,
+      rowLimit,
+    });
+
+  let rows = await run(files);
+  // Red de seguridad: si la poda por STAC dejó 0 filas pero había más archivos,
+  // reintenta sin poda (la poda puede estar desalineada con el listado S3).
+  if (rows.length === 0 && files.length < allFiles.length) {
+    console.warn(`[overture] ${theme}/${type}: 0 filas tras poda; reintentando con ${allFiles.length} archivos`);
+    rows = await run(allFiles);
+  }
+  return rows;
 }
 
 function asGeoJsonGeometry(value: unknown): { type: string; coordinates: unknown } | null {
@@ -331,7 +346,7 @@ async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): P
     release,
     ["id", "height", "num_floors", "class", "subtype", "names", "geometry"],
     bbox,
-    20000,
+    cfg.MAX_BUILDINGS * 2,
   );
 
   const features: OvertureBuildingCollection["features"] = [];
@@ -370,7 +385,7 @@ async function queryOvertureSegments(bbox: BBox, release = OVERTURE_RELEASE): Pr
     release,
     ["id", "subtype", "class", "geometry"],
     bbox,
-    20000,
+    cfg.MAX_ROADS * 2,
     { subtype: { $eq: "road" } },
   );
 
@@ -406,7 +421,7 @@ async function queryOvertureWater(bbox: BBox, release = OVERTURE_RELEASE): Promi
     release,
     ["id", "subtype", "geometry"],
     bbox,
-    5000,
+    cfg.MAX_WATER * 2,
   );
 
   const features: OvertureWaterCollection["features"] = [];
@@ -470,9 +485,8 @@ const LayerInput = z.object({
   placeName: z.string().max(120).optional(),
   layer: z.enum(["buildings", "roads", "water", "assemble"]),
   /** Only used for the assemble step — pass previous layer payloads. */
-  buildings: z.any().optional(),
-  segments: z.any().optional(),
-  water: z.any().optional(),
+  includeRoads: z.boolean().optional(),
+  includeWater: z.boolean().optional(),
 });
 
 /**
@@ -496,22 +510,24 @@ export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
     const placeName = data.placeName?.trim() || "Custom area";
 
     try {
+      // Las capas se quedan en la caché del servidor y solo devuelven un conteo:
+      // antes viajaban decenas de MB al cliente y de vuelta para ensamblar.
       if (data.layer === "buildings") {
-        return await queryOvertureBuildings(bbox);
+        const fc = await queryOvertureBuildings(bbox);
+        return { count: fc.features.length };
       }
       if (data.layer === "roads") {
-        return await queryOvertureSegments(bbox);
+        const fc = await queryOvertureSegments(bbox);
+        return { count: fc.features.length };
       }
       if (data.layer === "water") {
-        return await queryOvertureWater(bbox);
+        const fc = await queryOvertureWater(bbox);
+        return { count: fc.features.length };
       }
       // assemble
-      const buildings = (data.buildings ?? {
-        type: "FeatureCollection",
-        features: [],
-      }) as OvertureBuildingCollection;
-      const segments = data.segments as OvertureSegmentCollection | undefined;
-      const water = data.water as OvertureWaterCollection | undefined;
+      const buildings = await queryOvertureBuildings(bbox); // caché
+      const segments = data.includeRoads ? await queryOvertureSegments(bbox) : undefined;
+      const water = data.includeWater ? await queryOvertureWater(bbox) : undefined;
       return overtureToCityData(buildings, bbox, placeName, { segments, water });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

@@ -5,7 +5,7 @@ import { cfg } from "@/lib/city/config";
 import { DEFAULT_PRESET } from "@/lib/city/presets";
 import type { RomeOptions } from "@/lib/city/build-scene";
 import type { BBox, CityData, CityStats, PlaceHit, StudioStatus } from "@/lib/city/types";
-import { searchPlaces } from "@/lib/city/fetch-city";
+import { searchPlaces, fetchCity } from "@/lib/city/fetch-city";
 
 type Layers = {
   buildings: boolean;
@@ -220,6 +220,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       });
 
       let segments: unknown = undefined;
+      const overtureBuildings = (buildings as { count?: number } | null)?.count ?? 0;
       if (includeRoads) {
         set({ progress: 18, progressLabel: "Loading roads (STAC + parquet)…" });
         segments = await fetchOvertureLayerFn({
@@ -240,15 +241,29 @@ export const useStudio = create<StudioState>((set, get) => ({
       }
 
       set({ progress: 40, progressLabel: "Clipping features to bbox…" });
-      const data = (await fetchOvertureLayerFn({
-        data: {
-          ...base,
-          layer: "assemble",
-          buildings,
-          segments: includeRoads ? segments : undefined,
-          water: includeWater ? water : undefined,
-        },
+      let data = (await fetchOvertureLayerFn({
+        data: { ...base, layer: "assemble", includeRoads, includeWater },
       })) as CityData;
+
+      // Respaldo: si Overture no dio edificios, probar OpenStreetMap (Overpass).
+      if (!data?.buildings?.length) {
+        console.warn(`[generate] Overture devolvió ${overtureBuildings} edificios; probando OSM/Overpass`);
+        set({ progress: 42, progressLabel: "Overture sin edificios; probando OpenStreetMap…" });
+        try {
+          const osm = (await fetchCity({
+            data: { ...base, includeRoads, includeWater },
+          })) as CityData;
+          if (osm?.buildings?.length) data = osm;
+        } catch (e) {
+          console.warn("[generate] Overpass también falló", e);
+        }
+      }
+      if (!data?.buildings?.length) {
+        throw new Error(
+          "No se encontraron edificios en esta zona (Overture y OpenStreetMap devolvieron 0). " +
+            "Prueba una zona más pequeña o revisa los logs del servidor ([overture] files ok/failed).",
+        );
+      }
 
       if (!data || !data.extent) {
         throw new Error("No map data returned for this area.");

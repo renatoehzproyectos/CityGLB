@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { CREDITS, ROME_PRESETS } from "@/lib/city/rome";
+import { SANTIAGO_PRESETS } from "@/lib/city/presets";
 import { Switch } from "@/components/ui/switch";
 import { bboxSizeMeters, formatSpan, validateBBox } from "@/lib/city/geo";
 import { cityFilename } from "@/lib/city/filename";
@@ -303,8 +304,25 @@ export function ControlPanel({ exportFn }: Props) {
                       </Button>
                     ))}
                   </div>
+                  <Label>Santiago de Chile</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SANTIAGO_PRESETS.map((p) => (
+                      <Button
+                        key={p.id}
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setBbox(p.bbox, `${p.name}, ${p.city}`);
+                          setRomeMode(true);
+                        }}
+                      >
+                        {p.name}
+                      </Button>
+                    ))}
+                  </div>
                   <RowSwitch
-                    label="Modo Roma"
+                    label="Modo realista (satélite HD, PBR, SRTM, cielo; Roma suma monumentos)"
                     checked={Object.values(rome).every(Boolean)}
                     onCheckedChange={setRomeMode}
                   />

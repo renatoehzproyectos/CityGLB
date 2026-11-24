@@ -22,9 +22,9 @@ export const cfg = {
   } as Record<string, number>,
 
   FLAT_TERRAIN: false, // now uses real elevation
-  MAX_BUILDINGS: 20000,
-  MAX_ROADS: 12000,
-  MAX_WATER: 1200,
+  MAX_BUILDINGS: 80000,
+  MAX_ROADS: 60000,
+  MAX_WATER: 3000,
   MAX_PORT: 2000, // piers, breakwaters, quays, marinas, harbours, groynes
   MAX_COASTLINE: 800, // natural=coastline segments
   SIMPLIFY_TOLERANCE: 0.6,
@@ -38,7 +38,7 @@ export const cfg = {
   ENABLE_TREES: true,
   TREE_DENSITY: 0.00028, // trees per m² (denser, park/forest-rich feel)
   MAX_TREE_DENSITY: 0.004, // 4000 trees/km² — upper bound for the density slider
-  MAX_TREES: 40000,
+  MAX_TREES: 80000,
   TREE_MIN_SLOPE: 0.0,
   TREE_MAX_SLOPE: 0.45, // avoid steep cliffs
 

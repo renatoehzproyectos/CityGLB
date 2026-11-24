@@ -18,7 +18,8 @@ const compressors: Compressors = {
 };
 
 /** Max concurrent parquet file opens (network + WASM memory). */
-const READ_CONCURRENCY = 3;
+const READ_CONCURRENCY = 6;
+const READ_RETRIES = 2;
 
 export type OvertureRow = Record<string, unknown>;
 
@@ -40,28 +41,50 @@ export async function queryOvertureFiles(opts: QueryOvertureOptions): Promise<Ov
 
   const rows: OvertureRow[] = [];
   let next = 0;
+  let failed = 0;
+  let ok = 0;
+  let firstError = "";
 
   async function worker() {
     while (rows.length < rowLimit) {
       const i = next++;
       if (i >= urls.length) return;
-      try {
-        const batch = await readOneFile(
-          urls[i],
-          byteLengths?.[i],
-          columns,
-          filter,
-          rowLimit - rows.length,
-        );
-        if (batch.length) rows.push(...batch);
-      } catch (err) {
-        console.warn(`[overture] skip ${urls[i]}:`, err instanceof Error ? err.message : err);
+      let lastErr: unknown = null;
+      let done = false;
+      for (let attempt = 0; attempt <= READ_RETRIES && !done; attempt++) {
+        try {
+          const batch = await readOneFile(
+            urls[i],
+            byteLengths?.[i],
+            columns,
+            filter,
+            rowLimit - rows.length,
+          );
+          if (batch.length) rows.push(...batch);
+          ok++;
+          done = true;
+        } catch (err) {
+          lastErr = err;
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        }
+      }
+      if (!done) {
+        failed++;
+        const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+        if (!firstError) firstError = msg;
+        console.warn(`[overture] skip ${urls[i]}:`, msg);
       }
     }
   }
 
   const workers = Array.from({ length: Math.min(READ_CONCURRENCY, urls.length) }, () => worker());
   await Promise.all(workers);
+  console.info(`[overture] files ok=${ok} failed=${failed} rows=${rows.length}`);
+  // Antes los fallos se tragaban y el resultado era [] "válido". Ahora, si NINGÚN
+  // archivo se pudo leer, es un error real (red, release retirado, CORS, timeout).
+  if (ok === 0 && failed > 0) {
+    throw new Error(`no se pudo leer ningún archivo parquet (${failed} fallaron): ${firstError}`);
+  }
   return rows.slice(0, rowLimit);
 }
 
@@ -81,7 +104,7 @@ async function readOneFile(
 
   let metadata: FileMetaData | undefined;
   try {
-    metadata = await parquetMetadataAsync(file, { compressors });
+    metadata = await parquetMetadataAsync(file);
   } catch {
     metadata = undefined;
   }

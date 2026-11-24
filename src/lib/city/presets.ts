@@ -46,4 +46,16 @@ export const PRESETS: CityPreset[] = [
   },
 ];
 
+/** Santiago de Chile: zonas de ~1.5 km (editables). */
+export const SANTIAGO_PRESETS: CityPreset[] = [
+  { id: "scl-centro", name: "Centro y La Moneda", city: "Santiago",
+    bbox: { minLon: -70.6585, minLat: -33.4485, maxLon: -70.6425, maxLat: -33.4365 } },
+  { id: "scl-bellasartes", name: "Cerro Santa Lucía", city: "Santiago",
+    bbox: { minLon: -70.6485, minLat: -33.4480, maxLon: -70.6330, maxLat: -33.4380 } },
+  { id: "scl-providencia", name: "Providencia", city: "Santiago",
+    bbox: { minLon: -70.6290, minLat: -33.4290, maxLon: -70.6130, maxLat: -33.4190 } },
+  { id: "scl-costanera", name: "Costanera Center", city: "Santiago",
+    bbox: { minLon: -70.6120, minLat: -33.4220, maxLon: -70.5960, maxLat: -33.4120 } },
+];
+
 export const DEFAULT_PRESET = PRESETS[0];

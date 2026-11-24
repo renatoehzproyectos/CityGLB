@@ -920,7 +920,7 @@ function scatterTrees(
 
   // Exclusion zones: buildings (centroid + radius) and dense samples along every road
   const exclude: { x: number; z: number; r: number }[] = [];
-  for (const b of data.buildings.slice(0, 1200)) {
+  for (const b of data.buildings) {
     const [cx, cz] = centroid(b.ring);
     const area = ringArea(b.ring);
     const r = Math.sqrt(area / Math.PI) * 1.35 + 4;
@@ -951,6 +951,30 @@ function scatterTrees(
     }
   }
 
+  // Rejilla espacial: con decenas de miles de exclusiones, el barrido lineal por
+  // cada intento era inviable. Cada círculo se registra en las celdas que toca.
+  const CELL = 32;
+  const cellKey = (cx: number, cz: number) => cx * 73856093 ^ cz * 19349663;
+  const grid2 = new Map<number, { x: number; z: number; r: number }[]>();
+  for (const e of exclude) {
+    const x0 = Math.floor((e.x - e.r) / CELL), x1 = Math.floor((e.x + e.r) / CELL);
+    const z0 = Math.floor((e.z - e.r) / CELL), z1 = Math.floor((e.z + e.r) / CELL);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        const k = cellKey(cx, cz);
+        const arr = grid2.get(k);
+        if (arr) arr.push(e);
+        else grid2.set(k, [e]);
+      }
+    }
+  }
+  const isExcluded = (x: number, z: number) => {
+    const list = grid2.get(cellKey(Math.floor(x / CELL), Math.floor(z / CELL)));
+    if (!list) return false;
+    for (const e of list) if (Math.hypot(x - e.x, z - e.z) < e.r) return true;
+    return false;
+  };
+
   const buckets: THREE.Matrix4[][] = variants.map(() => []);
 
   while (placed < count && attempts < maxAttempts) {
@@ -970,14 +994,7 @@ function scatterTrees(
     if (slope > cfg.TREE_MAX_SLOPE) continue;
 
     // Exclusion: no trees on roads, buildings, or water
-    let ok = true;
-    for (const e of exclude) {
-      if (Math.hypot(x - e.x, z - e.z) < e.r) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok) continue;
+    if (isExcluded(x, z)) continue;
 
     // Where we have ESA WorldCover, only let trees grow on vegetated/land
     // pixels — never on built-up, water, or snow/ice classification.
