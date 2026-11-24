@@ -116,14 +116,28 @@ function extractPolygons(geom: OvertureGeometry): LonLat[][][] {
   return geom.type === "Polygon" ? [geom.coordinates] : geom.coordinates;
 }
 
-function heightFromProps(props: OvertureBuildingProps): number {
+function knownHeight(props: OvertureBuildingProps): number | null {
   if (typeof props.height === "number" && props.height > 0) {
     return clampHeight(props.height);
   }
   if (typeof props.num_floors === "number" && props.num_floors > 0) {
     return clampHeight(props.num_floors * cfg.LEVEL_HEIGHT);
   }
-  return cfg.DEFAULT_BUILDING_HEIGHT;
+  return null;
+}
+
+/**
+ * La mayoría de edificios de Overture/OSM no traen altura: todos salían a 12 m y el
+ * skyline quedaba plano. Se estima por huella y tipo, con variación determinista
+ * (misma altura en cada regeneración). Heurística global, no específica de una ciudad.
+ */
+function estimatedHeight(kind: string, area: number, seed: number): number {
+  const v = Math.abs(Math.sin(seed * 12.9898) * 43758.5453) % 1;
+  if (kind === "church" || kind === "cathedral" || kind === "religious") return 16 + v * 14;
+  if (kind === "industrial" || kind === "warehouse" || kind === "garage" || kind === "shed") return 6 + v * 5;
+  if (kind === "house" || kind === "detached" || kind === "garage" || area < 90) return 5 + v * 4;
+  if (area < 400) return 11 + v * 9; // 3–6 plantas
+  return 14 + v * 11;
 }
 
 function kindFromProps(props: OvertureBuildingProps): string {
@@ -148,7 +162,7 @@ export function overtureBuildingsToFeatures(
     if (f.geometry.type !== "Polygon" && f.geometry.type !== "MultiPolygon") continue;
 
     const props = f.properties ?? {};
-    const height = heightFromProps(props);
+    const known = knownHeight(props);
     const kind = kindFromProps(props);
 
     for (const poly of extractPolygons(f.geometry)) {
@@ -166,6 +180,8 @@ export function overtureBuildingsToFeatures(
         if (hr && ringArea(hr) > 4) holes.push(hr);
       }
 
+      const height =
+        known ?? clampHeight(estimatedHeight(kind, area, ring[0][0] * 7.31 + ring[0][1] * 3.17));
       out.push({ ring, holes, height, kind });
     }
   }

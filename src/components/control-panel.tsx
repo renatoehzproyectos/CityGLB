@@ -333,7 +333,7 @@ export function ControlPanel({ exportFn }: Props) {
                   <RowSwitch label="Elevación NASA SRTM" checked={rome.srtm} onCheckedChange={(on) => setRome({ srtm: on })} />
                   <RowSwitch label="Pinos piñoneros densos" checked={rome.vegetation} onCheckedChange={(on) => setRome({ vegetation: on })} />
                   <RowSwitch label="Cielo con nubes y luz cálida" checked={rome.atmosphere} onCheckedChange={(on) => setRome({ atmosphere: on })} />
-                  <RowSwitch label="Paleta cálida (ocre, terracota, tejas)" checked={rome.warmBuildings} onCheckedChange={(on) => setRome({ warmBuildings: on })} />
+                  <RowSwitch label="Paleta y vegetación según la región" checked={rome.warmBuildings} onCheckedChange={(on) => setRome({ warmBuildings: on })} />
                   <RowSwitch label="Satélite HD (4096 px)" checked={rome.hdSatellite} onCheckedChange={(on) => setRome({ hdSatellite: on })} />
                   <p className="text-[10px] leading-snug text-subtle">{CREDITS}</p>
                 </div>

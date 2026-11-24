@@ -110,12 +110,45 @@ const WARM_ROOFS: [number, number, number][] = [
   [0.7, 0.4, 0.3],
 ];
 const WARM_FLAT_ROOF: [number, number, number] = [0.66, 0.5, 0.4];
+const NEUTRAL_FACADES: [number, number, number][] = [
+  [0.82, 0.78, 0.7],
+  [0.72, 0.64, 0.56],
+  [0.64, 0.42, 0.34], // ladrillo
+  [0.86, 0.84, 0.8],
+  [0.74, 0.72, 0.7],
+  [0.7, 0.6, 0.5],
+];
+const NEUTRAL_ROOFS: [number, number, number][] = [
+  [0.34, 0.35, 0.38], // pizarra
+  [0.44, 0.4, 0.38],
+  [0.56, 0.3, 0.24],
+  [0.4, 0.38, 0.36],
+];
 let WARM = false;
+let FACADES = WARM_FACADES;
+let ROOFS = WARM_ROOFS;
+
+/** Mediterráneo, Oriente Medio, N. de África y América Latina → paleta cálida; resto → neutra. */
+function regionIsWarm(lat: number, lon: number): boolean {
+  if (lat > 12 && lat < 47 && lon > -12 && lon < 62) return true;
+  if (lat > -56 && lat < 33 && lon > -118 && lon < -34) return true;
+  return false;
+}
+/** Estilo de vegetación por región. */
+function regionTreeStyle(lat: number, lon: number): "mediterranean" | "tropical" | "temperate" {
+  const med =
+    (lat > 30 && lat < 46 && lon > -10 && lon < 36) ||
+    (lat > -40 && lat < -28 && lon > -75 && lon < -68) || // Chile central
+    (lat > 32 && lat < 38 && lon > -124 && lon < -116); // California
+  if (med) return "mediterranean";
+  if (Math.abs(lat) < 23) return "tropical";
+  return "temperate";
+}
 
 /** Individualized facade color: palette variant per kind, shaded slightly by height. */
 function buildingColor(b: BuildingFeature): [number, number, number] {
   if (WARM) {
-    const w = pickVariant(WARM_FACADES, buildingHash(b));
+    const w = pickVariant(FACADES, buildingHash(b));
     const th = Math.min(1, Math.max(0, (b.height - 8) / 80));
     return [w[0] * (1 - th * 0.1), w[1] * (1 - th * 0.08), w[2] * (1 - th * 0.04)];
   }
@@ -132,7 +165,7 @@ function buildingColor(b: BuildingFeature): [number, number, number] {
 
 /** Roof tint variant per building, following the same stable hash as the facade. */
 function roofColor(b: BuildingFeature): [number, number, number] {
-  if (WARM) return pickVariant(WARM_ROOFS, 1 - buildingHash(b) * 0.999);
+  if (WARM) return pickVariant(ROOFS, 1 - buildingHash(b) * 0.999);
   const palette = ROOF_TINTS[b.kind] ?? ROOF_TINTS.default;
   const t = 1 - buildingHash(b); // decorrelate from facade pick
   return pickVariant(palette, t < 0 ? 0 : t > 1 ? 1 : t);
@@ -334,6 +367,18 @@ function buildingsGeometry(
     const baseY = grid ? footprintMinHeight(grid, b.ring) : 0;
     geo.translate(0, baseY, 0);
     paintGeometry(geo, buildingColor(b));
+    // AO barato: base de los muros más oscura (contacto con la calle) → volumen y profundidad.
+    {
+      const pos = geo.getAttribute("position");
+      const nrm0 = geo.getAttribute("normal");
+      const col0 = geo.getAttribute("color");
+      for (let i = 0; i < pos.count; i++) {
+        if (Math.abs(nrm0.getY(i)) > 0.5) continue;
+        const t = Math.min(1, Math.max(0, (pos.getY(i) - baseY) / 6));
+        const f = 0.7 + 0.3 * (t * t * (3 - 2 * t));
+        col0.setXYZ(i, col0.getX(i) * f, col0.getY(i) * f, col0.getZ(i) * f);
+      }
+    }
     // Las tapas (normal ±Y) heredaban UV en metros y mostraban la rejilla de ventanas
     // sobre los techos. Las apuntamos a una zona lisa de la textura y, en modo cálido,
     // las pintamos como azotea.
@@ -479,7 +524,7 @@ function createWindowTexture(warm = false): THREE.Texture {
       const shade = 30 + Math.round(((c * 7 + r * 13) % 5) * 6); // subtle per-window variation
       // Cálido: ventanas pardas de bajo contraste (sombra de postigo), no vidrio negro.
       ctx.fillStyle = warm
-        ? `rgb(${150 + shade * 0.4}, ${128 + shade * 0.3}, ${104 + shade * 0.25})`
+        ? `rgb(${176 + shade * 0.3}, ${152 + shade * 0.25}, ${126 + shade * 0.2})`
         : `rgb(${shade + 10}, ${shade + 18}, ${shade + 30})`;
       ctx.fillRect(x, y, winW, winH);
       ctx.strokeStyle = warm ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.35)";
@@ -813,9 +858,9 @@ function paintTree(merged: THREE.BufferGeometry, trunkTopY: number, canopyTint: 
   for (let i = 0; i < count; i++) {
     const y = pos.getY(i);
     if (y < trunkTopY) {
-      colors[i * 3] = 0.32 + (i % 5) * 0.01;
-      colors[i * 3 + 1] = 0.2;
-      colors[i * 3 + 2] = 0.11;
+      colors[i * 3] = 0.2 + (i % 5) * 0.008;
+      colors[i * 3 + 1] = 0.13;
+      colors[i * 3 + 2] = 0.08;
     } else {
       colors[i * 3] = canopyTint[0];
       colors[i * 3 + 1] = canopyTint[1];
@@ -910,6 +955,22 @@ const TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
   { kind: "layered", tint: [0.29, 0.47, 0.26] },
 ];
 
+const TROPICAL_TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
+  { kind: "round", tint: [0.12, 0.3, 0.1] },
+  { kind: "round", tint: [0.16, 0.34, 0.12] },
+  { kind: "round", tint: [0.1, 0.26, 0.11] },
+  { kind: "layered", tint: [0.14, 0.31, 0.13] },
+  { kind: "round", tint: [0.2, 0.36, 0.14] },
+  { kind: "layered", tint: [0.11, 0.27, 0.12] },
+];
+const TEMPERATE_TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
+  { kind: "round", tint: [0.16, 0.3, 0.12] },
+  { kind: "round", tint: [0.2, 0.34, 0.13] },
+  { kind: "round", tint: [0.13, 0.27, 0.12] },
+  { kind: "layered", tint: [0.15, 0.3, 0.14] },
+  { kind: "conifer", tint: [0.08, 0.2, 0.12] },
+  { kind: "round", tint: [0.24, 0.33, 0.12] },
+];
 const ROME_TREE_VARIANTS: { kind: TreeKind; tint: [number, number, number] }[] = [
   { kind: "stonepine", tint: [0.07, 0.17, 0.09] },
   { kind: "stonepine", tint: [0.09, 0.2, 0.1] },
@@ -963,14 +1024,21 @@ function scatterTrees(
       for (let i = 0; i < w * h; i++) {
         const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
         const exg = 2 * g - r - b;
-        data[i] = exg > 14 && g < 170 ? 2 : exg > 4 && g < 150 ? 1 : 0;
+        data[i] = exg > 20 && g < 160 ? 2 : exg > 8 && g < 140 ? 1 : 0;
       }
       greenMask = { w, h, data };
     } catch {
       greenMask = null; // canvas "tainted": se usa el reparto por ruido
     }
   }
-  const variants = pines ? ROME_TREE_VARIANTS : TREE_VARIANTS;
+  const style = regionTreeStyle(data.origin.lat, data.origin.lon);
+  const variants = pines
+    ? style === "mediterranean"
+      ? ROME_TREE_VARIANTS
+      : style === "tropical"
+        ? TROPICAL_TREE_VARIANTS
+        : TEMPERATE_TREE_VARIANTS
+    : TREE_VARIANTS;
 
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
@@ -1094,7 +1162,7 @@ function scatterTrees(
 
     // Slight random scale / rotation / variant pick, and cluster same-variant
     // trees loosely (real forests aren't a uniform shuffle of species).
-    const s = pines ? (greenMask ? 1.05 : 0.75) + rand(attempts * 3) * 0.9 : 0.65 + rand(attempts * 3) * 1.0;
+    const s = pines ? (greenMask ? 0.7 : 0.7) + rand(attempts * 3) * 0.55 : 0.65 + rand(attempts * 3) * 1.0;
     const rot = rand(attempts * 4) * Math.PI * 2;
     const clusterSeed = Math.floor(x / 40) * 13 + Math.floor(z / 40) * 7;
     const variantT = (rand(clusterSeed) * 0.7 + rand(attempts * 5) * 0.3) % 1;
@@ -1196,6 +1264,11 @@ export async function buildCityMeshes(
   const rome = options.rome;
   group.userData.credits = CREDITS;
   WARM = Boolean(rome?.warmBuildings);
+  {
+    const warmRegion = regionIsWarm(data.origin.lat, data.origin.lon);
+    FACADES = warmRegion ? WARM_FACADES : NEUTRAL_FACADES;
+    ROOFS = warmRegion ? WARM_ROOFS : NEUTRAL_ROOFS;
+  }
 
   // Parallelize elevation + land-cover fetches (they are independent network work).
   // Weighted progress: elevation 0–35%, landcover 0–20% of total meshing budget.
@@ -1263,7 +1336,7 @@ export async function buildCityMeshes(
     try {
       buildingMat.map = createWindowTexture(WARM);
       buildingMat.normalMap = createWindowNormalMap();
-      buildingMat.normalScale = new THREE.Vector2(WARM ? 0.3 : 0.6, WARM ? 0.3 : 0.6);
+      buildingMat.normalScale = new THREE.Vector2(WARM ? 0.2 : 0.6, WARM ? 0.2 : 0.6);
       buildingMat.needsUpdate = true;
     } catch (e) {
       console.warn("Window texture failed", e);
@@ -1507,7 +1580,7 @@ export async function buildCityMeshes(
     const area = (data.extent.maxX - data.extent.minX) * (data.extent.maxZ - data.extent.minZ);
     const dense = Boolean(rome?.vegetation);
     // Con máscara verde del satélite se sube mucho la densidad: solo cae en parques.
-    const mult = dense ? (satCanvasForTrees ? 10 : 2.4) : 1;
+    const mult = dense ? (satCanvasForTrees ? 6 : 2.4) : 1;
     const desired = Math.min(dense ? cfg.MAX_TREES * 1.5 : cfg.MAX_TREES, Math.floor(area * treeDensity * mult));
     treesMesh = scatterTrees(grid, data, desired, landCoverGrid, dense, satCanvasForTrees) ?? undefined;
     if (treesMesh) {
