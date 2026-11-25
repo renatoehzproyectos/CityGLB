@@ -1,7 +1,7 @@
 import type { BBox } from "./types";
 import { fetchHeightGrid, type HeightGrid } from "./elevation";
 import { fetchLandCoverGrid, type LandCoverGrid } from "./landcover";
-import { buildSatelliteCanvas } from "./satellite";
+import { buildSatelliteCanvas, satelliteMaxPx } from "./satellite";
 import { loadPolyHavenPbr } from "./pbr";
 
 export type AssetOpts = { satellite: boolean; landCover: boolean; hdSatellite: boolean; pbr: boolean; flatTerrain: boolean };
@@ -53,7 +53,7 @@ export function getCityAssets(bbox: BBox, o: AssetOpts): CityAssets {
 
   const sat =
     o.satellite && !o.landCover
-      ? buildSatelliteCanvas(bbox, o.hdSatellite ? { maxTiles: 140, targetPx: 4096 } : { maxTiles: 48, targetPx: 1536 }).catch((e) => {
+      ? buildSatelliteCanvas(bbox, o.hdSatellite ? { maxPx: satelliteMaxPx(), zoomCap: 19 } : { maxPx: 2048, zoomCap: 18 }).catch((e) => {
           console.warn("Satellite texture failed", e);
           return null;
         })

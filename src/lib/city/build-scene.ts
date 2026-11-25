@@ -1435,7 +1435,11 @@ export async function buildCityMeshes(
         satCanvasForTrees = canvas;
         const tex = new THREE.CanvasTexture(canvas);
         tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = 4;
+        tex.anisotropy = 16; // three lo limita al máximo de la GPU
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.userData.mimeType = "image/jpeg"; // foto: JPEG en el GLB (un PNG de 8192² pesaría ~100 MB)
         tex.needsUpdate = true;
         terrainMat.map = tex;
         terrainMat.color.set(0xffffff);

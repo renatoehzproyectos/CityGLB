@@ -1,125 +1,161 @@
 /**
- * Free satellite / aerial texture (no API key).
- * Uses Esri World Imagery XYZ tiles for the given bbox.
+ * Imagen satelital gratuita (sin API key): teselas Esri World Imagery para el bbox.
+ *
+ * Calidad máxima:
+ *  - Elige el zoom MÁS ALTO cuyo mosaico nativo cabe en `maxPx` (sin reescalar ni
+ *    recortar de más) y detecta hasta qué zoom hay imagen real en la zona.
+ *  - Dibuja las teselas directamente sobre el recorte exacto del bbox (sin mosaico
+ *    intermedio gigante ni pérdida por submuestreo).
+ *  - Si una tesela falla o es el aviso gris "Map data not yet available", la rellena
+ *    con la del zoom superior en vez de dejar un hueco.
  */
 import type { BBox } from "./types";
 
 const TILE = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+const TS = 256;
 
-function lon2tile(lon: number, z: number) {
-  return ((lon + 180) / 360) * Math.pow(2, z);
-}
-function lat2tile(lat: number, z: number) {
+const lon2tile = (lon: number, z: number) => ((lon + 180) / 360) * Math.pow(2, z);
+const lat2tile = (lat: number, z: number) => {
   const r = (lat * Math.PI) / 180;
-  return (
-    ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * Math.pow(2, z)
-  );
+  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * Math.pow(2, z);
+};
+
+/** Lado máximo de textura que conviene pedir en este dispositivo (GPU + memoria del canvas). */
+export function satelliteMaxPx(): number {
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2") as WebGL2RenderingContext | null;
+    const maxTex = gl ? (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) : 4096;
+    const mobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+    return Math.max(2048, Math.min(mobile ? 4096 : 8192, maxTex));
+  } catch {
+    return 4096;
+  }
 }
 
-function loadImage(url: string): Promise<HTMLImageElement | null> {
+function loadImage(url: string, retries = 2): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src = url;
+    const attempt = (n: number) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => (n < retries ? setTimeout(() => attempt(n + 1), 250 * (n + 1)) : resolve(null));
+      img.src = url;
+    };
+    attempt(0);
   });
 }
 
-/**
- * Composite World Imagery tiles covering bbox into a canvas.
- * Returns null if fetch fails.
- */
+const tileUrl = (z: number, x: number, y: number) =>
+  TILE.replace("{z}", String(z)).replace("{y}", String(y)).replace("{x}", String(x));
+
+/** El aviso "Map data not yet available" es casi uniforme: baja desviación de luminancia. */
+function isPlaceholder(img: HTMLImageElement): boolean {
+  try {
+    const c = document.createElement("canvas");
+    c.width = c.height = 24;
+    const x = c.getContext("2d", { willReadFrequently: true })!;
+    x.drawImage(img, 0, 0, 24, 24);
+    const d = x.getImageData(0, 0, 24, 24).data;
+    let m = 0, m2 = 0;
+    const n = 24 * 24;
+    for (let i = 0; i < n; i++) {
+      const l = d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11;
+      m += l; m2 += l * l;
+    }
+    m /= n;
+    return Math.sqrt(Math.max(0, m2 / n - m * m)) < 3.5;
+  } catch {
+    return false;
+  }
+}
+
+/** Mayor zoom (≤ zoomCap) con imagen real en el centro del bbox. */
+async function probeMaxZoom(bbox: BBox, zoomCap: number): Promise<number> {
+  const lon = (bbox.minLon + bbox.maxLon) / 2;
+  const lat = (bbox.minLat + bbox.maxLat) / 2;
+  for (let z = zoomCap; z >= 15; z--) {
+    const img = await loadImage(tileUrl(z, Math.floor(lon2tile(lon, z)), Math.floor(lat2tile(lat, z))), 1);
+    if (img && !isPlaceholder(img)) return z;
+  }
+  return 15;
+}
+
 export async function buildSatelliteCanvas(
   bbox: BBox,
-  options: { maxTiles?: number; targetPx?: number } = {}
+  options: { maxPx?: number; zoomCap?: number } = {},
 ): Promise<HTMLCanvasElement | null> {
-  const maxTiles = options.maxTiles ?? 36;
-  const targetPx = options.targetPx ?? 1024;
+  const maxPx = options.maxPx ?? 2048;
+  if (bbox.maxLon <= bbox.minLon || bbox.maxLat <= bbox.minLat) return null;
 
-  const widthDeg = bbox.maxLon - bbox.minLon;
-  const heightDeg = bbox.maxLat - bbox.minLat;
-  if (widthDeg <= 0 || heightDeg <= 0) return null;
-
-  // Choose zoom so ~maxTiles cover the area
-  let z = 14;
-  for (let trial = 18; trial >= 10; trial--) {
-    const x0 = lon2tile(bbox.minLon, trial);
-    const x1 = lon2tile(bbox.maxLon, trial);
-    const y0 = lat2tile(bbox.maxLat, trial);
-    const y1 = lat2tile(bbox.minLat, trial);
-    const nx = Math.ceil(x1) - Math.floor(x0);
-    const ny = Math.ceil(y1) - Math.floor(y0);
-    if (nx * ny <= maxTiles) {
-      z = trial;
-      break;
-    }
-    z = trial;
+  // Zoom: el mayor cuyo tamaño nativo no supera maxPx (≈15 % de margen), limitado por la cobertura real.
+  const zMax = await probeMaxZoom(bbox, options.zoomCap ?? 19);
+  const nativeAt = (z: number) => ({
+    w: (lon2tile(bbox.maxLon, z) - lon2tile(bbox.minLon, z)) * TS,
+    h: (lat2tile(bbox.minLat, z) - lat2tile(bbox.maxLat, z)) * TS,
+  });
+  let z = zMax;
+  while (z > 10) {
+    const n = nativeAt(z);
+    if (Math.max(n.w, n.h) <= maxPx * 1.15) break;
+    z--;
   }
 
-  const tx0 = Math.floor(lon2tile(bbox.minLon, z));
-  const tx1 = Math.ceil(lon2tile(bbox.maxLon, z)) - 1;
-  const ty0 = Math.floor(lat2tile(bbox.maxLat, z));
-  const ty1 = Math.ceil(lat2tile(bbox.minLat, z)) - 1;
+  const x0p = lon2tile(bbox.minLon, z) * TS;
+  const y0p = lat2tile(bbox.maxLat, z) * TS;
+  const nat = nativeAt(z);
+  const s = Math.min(1, maxPx / Math.max(nat.w, nat.h));
+  const W = Math.max(64, Math.round(nat.w * s));
+  const H = Math.max(64, Math.round(nat.h * s));
 
-  const tilesX = tx1 - tx0 + 1;
-  const tilesY = ty1 - ty0 + 1;
-  if (tilesX <= 0 || tilesY <= 0 || tilesX * tilesY > maxTiles * 2) return null;
-
-  const tileSize = 256;
-  const fullW = tilesX * tileSize;
-  const fullH = tilesY * tileSize;
+  const tx0 = Math.floor(x0p / TS), tx1 = Math.floor((x0p + nat.w) / TS);
+  const ty0 = Math.floor(y0p / TS), ty1 = Math.floor((y0p + nat.h) / TS);
+  if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 1300) return null;
 
   const canvas = document.createElement("canvas");
-  // Downscale if huge
-  const scale = Math.min(1, targetPx / Math.max(fullW, fullH));
-  canvas.width = Math.max(64, Math.round(fullW * scale));
-  canvas.height = Math.max(64, Math.round(fullH * scale));
+  canvas.width = W;
+  canvas.height = H;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.fillStyle = "#2a3328";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, W, H);
 
-  const jobs: Promise<void>[] = [];
-  for (let ty = ty0; ty <= ty1; ty++) {
-    for (let tx = tx0; tx <= tx1; tx++) {
-      const url = TILE.replace("{z}", String(z)).replace("{y}", String(ty)).replace("{x}", String(tx));
-      jobs.push(
-        loadImage(url).then((img) => {
-          if (!img) return;
-          const dx = (tx - tx0) * tileSize * scale;
-          const dy = (ty - ty0) * tileSize * scale;
-          ctx.drawImage(img, dx, dy, tileSize * scale, tileSize * scale);
-        })
-      );
+  const parentCache = new Map<string, Promise<HTMLImageElement | null>>();
+  const getTile = (zz: number, x: number, y: number) => {
+    const k = `${zz}/${x}/${y}`;
+    let p = parentCache.get(k);
+    if (!p) { p = loadImage(tileUrl(zz, x, y)); parentCache.set(k, p); }
+    return p;
+  };
+
+  const drawTile = async (tx: number, ty: number) => {
+    const dx = Math.floor((tx * TS - x0p) * s), dy = Math.floor((ty * TS - y0p) * s);
+    const dw = Math.ceil(TS * s) + 1, dh = Math.ceil(TS * s) + 1; // +1 px: evita costuras
+    let img = await getTile(z, tx, ty);
+    if (img && !isPlaceholder(img)) { ctx.drawImage(img, dx, dy, dw, dh); return; }
+    // Respaldo: usa la tesela del zoom superior (recorte del cuadrante correspondiente).
+    for (let L = 1; L <= 3 && z - L >= 8; L++) {
+      const parent = await getTile(z - L, tx >> L, ty >> L);
+      if (!parent || isPlaceholder(parent)) continue;
+      const sub = TS >> L;
+      ctx.drawImage(parent, (tx & ((1 << L) - 1)) * sub, (ty & ((1 << L) - 1)) * sub, sub, sub, dx, dy, dw, dh);
+      return;
     }
-  }
-  await Promise.all(jobs);
+  };
 
-  // Crop to exact bbox within the tile mosaic
-  const lon0 = (tx0 / Math.pow(2, z)) * 360 - 180;
-  const lon1 = ((tx1 + 1) / Math.pow(2, z)) * 360 - 180;
-  const n0 = Math.PI - (2 * Math.PI * ty0) / Math.pow(2, z);
-  const lat0 = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n0) - Math.exp(-n0)));
-  const n1 = Math.PI - (2 * Math.PI * (ty1 + 1)) / Math.pow(2, z);
-  const lat1 = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n1) - Math.exp(-n1)));
-
-  const u0 = (bbox.minLon - lon0) / (lon1 - lon0);
-  const u1 = (bbox.maxLon - lon0) / (lon1 - lon0);
-  // lat decreases downward in tiles
-  const v0 = (lat0 - bbox.maxLat) / (lat0 - lat1);
-  const v1 = (lat0 - bbox.minLat) / (lat0 - lat1);
-
-  const sx = Math.max(0, Math.floor(u0 * canvas.width));
-  const sy = Math.max(0, Math.floor(v0 * canvas.height));
-  const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil((u1 - u0) * canvas.width)));
-  const sh = Math.max(1, Math.min(canvas.height - sy, Math.ceil((v1 - v0) * canvas.height)));
-
-  const out = document.createElement("canvas");
-  out.width = sw;
-  out.height = sh;
-  const octx = out.getContext("2d");
-  if (!octx) return canvas;
-  octx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-  return out;
+  // Cola con concurrencia acotada (cientos de teselas sin saturar la red del navegador).
+  const jobs: [number, number][] = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) jobs.push([tx, ty]);
+  let next = 0;
+  const worker = async () => {
+    while (next < jobs.length) {
+      const [tx, ty] = jobs[next++];
+      await drawTile(tx, ty);
+    }
+  };
+  await Promise.all(Array.from({ length: 20 }, worker));
+  console.info(`[satellite] z${z}, ${jobs.length} teselas, ${W}×${H}px (nativo ${Math.round(nat.w)}×${Math.round(nat.h)})`);
+  return canvas;
 }
