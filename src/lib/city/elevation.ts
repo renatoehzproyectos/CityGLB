@@ -103,7 +103,7 @@ export async function fetchHeightGrid(
     targetMeters?: number;
     maxSamples?: number;
     /** "srtm" = NASA SRTM 1" (cae a Copernicus/Terrarium si falla). */
-    source?: "srtm" | "auto";
+    source?: "srtm" | "auto" | "terrarium";
     /** Called with fraction 0–1 as work completes. */
     onProgress?: (fraction: number) => void;
   } = {}
@@ -122,6 +122,10 @@ export async function fetchHeightGrid(
 
   const cols = Math.max(8, Math.min(maxSamples, Math.ceil(widthM / targetMeters)));
   const rows = Math.max(8, Math.min(maxSamples, Math.ceil(depthM / targetMeters)));
+
+  if (options.source === "terrarium") {
+    return fetchHeightGridTerrarium(bbox, origin, cols, rows, mPerDegLat, mPerDegLon, onProgress);
+  }
 
   const xs = new Float32Array(cols);
   const zs = new Float32Array(rows);

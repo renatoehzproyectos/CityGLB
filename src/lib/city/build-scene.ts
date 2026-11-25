@@ -5,6 +5,7 @@ import { bboxSizeMeters, ringArea, unproject } from "./geo";
 import type { BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
 import { fetchHeightGrid, sampleHeight, type HeightGrid } from "./elevation";
 import { buildSatelliteCanvas } from "./satellite";
+import { getCityAssets } from "./prefetch";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
 import type { RGB, RoofShape } from "./roof-data";
 import { COLOSSEUM, ROME_LANDMARKS, ROME_STATUE_SLOTS, CREDITS } from "./rome";
@@ -1303,56 +1304,19 @@ export async function buildCityMeshes(
     ROOFS = warmRegion ? WARM_ROOFS : NEUTRAL_ROOFS;
   }
 
-  // Parallelize elevation + land-cover fetches (they are independent network work).
-  // Weighted progress: elevation 0–35%, landcover 0–20% of total meshing budget.
-  let elevFrac = 0;
-  let coverFrac = 0;
-  const reportFetch = () => {
-    // Combined fetch stage occupies first 55% of meshing.
-    const combined = (elevFrac * 0.35 + coverFrac * 0.2) / 0.55;
-    onProgress?.(Math.min(0.55, combined * 0.55), "Loading terrain data…");
-  };
-
-  const elevPromise = !cfg.FLAT_TERRAIN
-    ? fetchHeightGrid(data.bbox, data.origin, {
-        targetMeters: Math.max(8, Math.min(24, (data.extent.maxX - data.extent.minX) / 96)),
-        maxSamples: 140,
-        source: rome?.srtm ? "srtm" : "auto",
-        onProgress: (f) => {
-          elevFrac = f;
-          reportFetch();
-        },
-      }).catch((e) => {
-        console.warn("Elevation fetch failed, falling back to flat", e);
-        return null as HeightGrid | null;
-      })
-    : Promise.resolve(null as HeightGrid | null);
-
-  const coverPromise = wantLandCover
-    ? fetchLandCoverGrid(data.bbox, {
-        targetMeters: 10,
-        maxSamples: 512,
-        onProgress: (f) => {
-          coverFrac = f;
-          reportFetch();
-        },
-      }).catch((e) => {
-        console.warn("Land cover fetch failed", e);
-        return null as LandCoverGrid | null;
-      })
-    : Promise.resolve(null as LandCoverGrid | null);
-
-  // Kick off satellite texture early so it overlaps with DEM/landcover + meshing.
-  const satPromise =
-    wantSatellite && !wantLandCover
-      ? buildSatelliteCanvas(
-          data.bbox,
-          rome?.hdSatellite ? { maxTiles: 140, targetPx: 4096 } : { maxTiles: 48, targetPx: 1536 },
-        ).catch((e) => {
-          console.warn("Satellite texture failed", e);
-          return null;
-        })
-      : Promise.resolve(null);
+  // Elevación, cobertura y satélite dependen solo del bbox: normalmente ya se están
+  // descargando desde que se pulsó "Generate" (ver prefetch.ts).
+  const assets = getCityAssets(data.bbox, {
+    satellite: wantSatellite,
+    landCover: wantLandCover,
+    hdSatellite: Boolean(rome?.hdSatellite),
+    pbr: Boolean(rome?.pbr),
+    flatTerrain: Boolean(cfg.FLAT_TERRAIN),
+  });
+  const elevPromise = assets.elev;
+  const coverPromise = assets.cover;
+  const satPromise = assets.sat;
+  onProgress?.(0.1, "Loading terrain data…");
 
   const [grid, landCoverGrid] = await Promise.all([elevPromise, coverPromise]);
   let satCanvasForTrees: HTMLCanvasElement | null = null;

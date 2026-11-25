@@ -231,11 +231,13 @@ async function getStacFileBBoxes(theme: string, type: string, release: string): 
     const itemCount = (collection.links ?? []).filter((l) => l.rel === "item").length;
     // Si el nº de bboxes no coincide con el nº de ítems, el orden NO es fiable:
     // podar con él puede descartar justo los archivos de la zona (→ 0 edificios).
-    if (itemCount === 0 || bboxes.length !== itemCount) {
+    // STAC permite que bbox[0] sea la unión de todo: en ese caso hay itemCount+1 entradas.
+    const perFile = bboxes.length === itemCount + 1 ? bboxes.slice(1) : bboxes;
+    if (itemCount === 0 || perFile.length !== itemCount) {
       console.warn(`[overture] STAC bboxes (${bboxes.length}) != items (${itemCount}); sin poda`);
       return null;
     }
-    const index: StacIndex = { bboxes };
+    const index: StacIndex = { bboxes: perFile };
     stacCache.set(cacheKey, { index, expiresAt: Date.now() + STAC_CACHE_TTL_MS });
     return index;
   } catch (err) {
@@ -534,9 +536,12 @@ export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
         return { count: fc.features.length };
       }
       // assemble
-      const buildings = await queryOvertureBuildings(bbox); // caché
-      const segments = data.includeRoads ? await queryOvertureSegments(bbox) : undefined;
-      const water = data.includeWater ? await queryOvertureWater(bbox) : undefined;
+      // Las tres capas en paralelo (antes: una tras otra, tres viajes al servidor).
+      const [buildings, segments, water] = await Promise.all([
+        queryOvertureBuildings(bbox),
+        data.includeRoads ? queryOvertureSegments(bbox) : Promise.resolve(undefined),
+        data.includeWater ? queryOvertureWater(bbox) : Promise.resolve(undefined),
+      ]);
       return overtureToCityData(buildings, bbox, placeName, { segments, water });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

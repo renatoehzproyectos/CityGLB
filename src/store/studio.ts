@@ -6,6 +6,7 @@ import { DEFAULT_PRESET } from "@/lib/city/presets";
 import type { RomeOptions } from "@/lib/city/build-scene";
 import type { BBox, CityData, CityStats, PlaceHit, StudioStatus } from "@/lib/city/types";
 import { searchPlaces, fetchCity } from "@/lib/city/fetch-city";
+import { getCityAssets } from "@/lib/city/prefetch";
 
 type Layers = {
   buildings: boolean;
@@ -213,37 +214,25 @@ export const useStudio = create<StudioState>((set, get) => ({
     };
 
     try {
-      // Real staged progress matching the server STAC/parquet work the user sees in logs.
-      set({ progress: 5, progressLabel: "Loading buildings (STAC + parquet)…" });
-      const buildings = await fetchOvertureLayerFn({
-        data: { ...base, layer: "buildings" },
-      });
-
-      let segments: unknown = undefined;
-      const overtureBuildings = (buildings as { count?: number } | null)?.count ?? 0;
-      if (includeRoads) {
-        set({ progress: 18, progressLabel: "Loading roads (STAC + parquet)…" });
-        segments = await fetchOvertureLayerFn({
-          data: { ...base, layer: "roads" },
+      // Arranca YA las descargas que solo dependen del bbox (elevación, satélite, texturas)
+      // para que viajen mientras el servidor lee Overture.
+      {
+        const st = get();
+        void getCityAssets(box, {
+          satellite: st.satellite,
+          landCover: st.landCover,
+          hdSatellite: st.rome.hdSatellite,
+          pbr: st.rome.pbr,
+          flatTerrain: false,
         });
-      } else {
-        set({ progress: 22, progressLabel: "Skipping roads…" });
       }
 
-      let water: unknown = undefined;
-      if (includeWater) {
-        set({ progress: 30, progressLabel: "Loading water (STAC + parquet)…" });
-        water = await fetchOvertureLayerFn({
-          data: { ...base, layer: "water" },
-        });
-      } else {
-        set({ progress: 34, progressLabel: "Skipping water…" });
-      }
-
-      set({ progress: 40, progressLabel: "Clipping features to bbox…" });
+      // Una sola petición: el servidor consulta edificios, calles y agua en paralelo.
+      set({ progress: 8, progressLabel: "Loading buildings, roads & water…" });
       let data = (await fetchOvertureLayerFn({
         data: { ...base, layer: "assemble", includeRoads, includeWater },
       })) as CityData;
+      const overtureBuildings = data?.buildings?.length ?? 0;
 
       // Respaldo: si Overture no dio edificios, probar OpenStreetMap (Overpass).
       if (!data?.buildings?.length) {
