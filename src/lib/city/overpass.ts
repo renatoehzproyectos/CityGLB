@@ -9,47 +9,12 @@ const OVERPASS_ENDPOINTS = [
 
 const UA = "CityGLB/1.0 (real-world city GLB generator)";
 
-function buildQuery(
-  bbox: BBox,
-  includeRoads: boolean,
-  includeWater: boolean,
-  includePorts = includeWater,
-): string {
+function buildQuery(bbox: BBox): string {
   const south = bbox.minLat.toFixed(6);
   const west = bbox.minLon.toFixed(6);
   const north = bbox.maxLat.toFixed(6);
   const east = bbox.maxLon.toFixed(6);
-
   const parts = [`way["building"]`, `relation["building"]`];
-  if (includeRoads) {
-    parts.push(
-      `way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|footway|cycleway)$"]`,
-    );
-  }
-  if (includeWater) {
-    parts.push(
-      `way["natural"="water"]`,
-      `way["waterway"="riverbank"]`,
-      `way["landuse"~"^(reservoir|basin)$"]`,
-      `way["water"]`,
-      `relation["natural"="water"]`,
-      // land/sea boundary, kept as its own feature type
-      `way["natural"="coastline"]`,
-    );
-  }
-  if (includePorts) {
-    parts.push(
-      // linear waterfront structures
-      `way["man_made"~"^(pier|breakwater|groyne)$"]`,
-      // area waterfront structures: quays, docks, marinas, harbours
-      `way["man_made"~"^(quay|dock)$"]`,
-      `way["leisure"="marina"]`,
-      `way["harbour"]`,
-      `relation["man_made"~"^(quay|dock)$"]`,
-      `relation["leisure"="marina"]`,
-    );
-  }
-
   return `[out:json][timeout:40][bbox:${south},${west},${north},${east}];(${parts.join(";")};);out body;>;out skel qt;`;
 }
 
@@ -82,9 +47,9 @@ async function fetchOsmApiXml(bbox: BBox, signal: AbortSignal): Promise<string> 
 
 export async function fetchOverpassCity(
   bbox: BBox,
-  opts: { includeRoads: boolean; includeWater: boolean; placeName: string },
+  opts: { placeName: string },
 ): Promise<CityData> {
-  const query = buildQuery(bbox, opts.includeRoads, opts.includeWater, opts.includeWater);
+  const query = buildQuery(bbox);
   let lastError: Error | null = null;
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -92,10 +57,7 @@ export async function fetchOverpassCity(
     const timer = setTimeout(() => controller.abort(), 45_000);
     try {
       const json = await postOverpass(endpoint, query, controller.signal);
-      return parseOsm(json as Parameters<typeof parseOsm>[0], bbox, opts.placeName, {
-        includeRoads: opts.includeRoads,
-        includeWater: opts.includeWater,
-      });
+      return parseOsm(json as Parameters<typeof parseOsm>[0], bbox, opts.placeName);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     } finally {
@@ -107,10 +69,7 @@ export async function fetchOverpassCity(
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
     const xml = await fetchOsmApiXml(bbox, controller.signal);
-    return parseOsm(parseOsmXml(xml), bbox, opts.placeName, {
-      includeRoads: opts.includeRoads,
-      includeWater: opts.includeWater,
-    });
+    return parseOsm(parseOsmXml(xml), bbox, opts.placeName);
   } catch (err) {
     lastError = err instanceof Error ? err : lastError;
   } finally {

@@ -14,12 +14,9 @@ export function StudioShell() {
   const view = useStudio((s) => s.view);
   const city = useStudio((s) => s.city);
   const status = useStudio((s) => s.status);
-  const autoRotate = useStudio((s) => s.autoRotate);
   const layers = useStudio((s) => s.layers);
-  const treeDensity = useStudio((s) => s.treeDensity);
   const satellite = useStudio((s) => s.satellite);
-  const landCover = useStudio((s) => s.landCover);
-  const rome = useStudio((s) => s.rome);
+  const realistic = useStudio((s) => s.realistic);
   const progress = useStudio((s) => s.progress);
   const progressLabel = useStudio((s) => s.progressLabel);
   const setReady = useStudio((s) => s.setReady);
@@ -60,12 +57,9 @@ export function StudioShell() {
             <div className={cn("absolute inset-0", showModel ? "visible" : "pointer-events-none invisible")}>
               <CityViewer
                 city={city}
-                autoRotate={autoRotate}
                 layers={layers}
-                treeDensity={treeDensity}
                 satellite={satellite}
-                landCover={landCover}
-                rome={rome}
+                realistic={realistic}
                 onReady={setReady}
                 onError={setMeshError}
                 onExportReady={setExportFn}

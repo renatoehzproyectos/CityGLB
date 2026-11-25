@@ -1,9 +1,9 @@
 import { cfg } from "./config";
-import { bboxCenter, pathLength, project, ringArea, roundMeters } from "./geo";
+import { bboxCenter, project, ringArea, roundMeters } from "./geo";
 import { clampHeight, estimateHeight, hash01 } from "./height";
 import { facadeFromProps, roofFromProps } from "./roof-data";
 import { simplifyRing, uniqueRing } from "./simplify";
-import type { BBox, BuildingFeature, CityData, CoastlineFeature, PortFeature, RoadFeature, WaterFeature } from "./types";
+import type { BBox, BuildingFeature, CityData } from "./types";
 
 type OsmTags = Record<string, string>;
 
@@ -111,10 +111,6 @@ function prepareRing(
   return pts.length >= 4 ? pts : null;
 }
 
-function roadWidth(highway: string): number {
-  return cfg.ROAD_WIDTH_MAP[highway] ?? cfg.DEFAULT_ROAD_WIDTH;
-}
-
 function jitterDefaultHeight(id: number, height: number, tags: OsmTags | undefined): number {
   const explicit = tags?.height || tags?.["building:height"] || tags?.["building:levels"];
   if (explicit) return height;
@@ -122,7 +118,7 @@ function jitterDefaultHeight(id: number, height: number, tags: OsmTags | undefin
   return clampHeight(height * j);
 }
 
-export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts: { includeRoads: boolean; includeWater: boolean }): CityData {
+export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string): CityData {
   const origin = bboxCenter(bbox);
   const elements = json.elements ?? [];
   const nodes = new Map<number, [number, number]>();
@@ -154,6 +150,7 @@ export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts:
       holes,
       height: jitterDefaultHeight(id, estimateHeight(tags), tags),
       kind,
+      heightKnown: Boolean(tags?.height || tags?.["building:height"] || tags?.["building:levels"] || tags?.levels),
       roof: roofFromProps({
         shape: tags?.["roof:shape"], color: tags?.["roof:colour"] ?? tags?.["roof:color"],
         material: tags?.["roof:material"], height: tags?.["roof:height"], direction: tags?.["roof:direction"],
@@ -196,184 +193,6 @@ export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts:
   buildings.sort((a, b) => ringArea(b.ring) - ringArea(a.ring));
   const clippedBuildings = buildings.slice(0, cfg.MAX_BUILDINGS);
 
-  const roads: RoadFeature[] = [];
-  if (opts.includeRoads) {
-    for (const way of ways.values()) {
-      const highway = way.tags?.highway;
-      if (!highway) continue;
-      if (way.tags?.area === "yes") continue;
-      const coords = wayCoords(way, nodes);
-      if (!coords) continue;
-      const path = uniqueRing(
-        coords.map(([lon, lat]) => {
-          const [x, z] = project(lon, lat, origin.lon, origin.lat);
-          return [roundMeters(x), roundMeters(z)] as [number, number];
-        }),
-      );
-      const simplified = simplifyRing(path, Math.max(cfg.SIMPLIFY_TOLERANCE, 1.2));
-      if (simplified.length < 2) continue;
-      if (pathLength(simplified) < cfg.MIN_ROAD_LENGTH) continue;
-      roads.push({
-        path: simplified,
-        width: roadWidth(highway),
-        highway,
-      });
-      if (roads.length >= cfg.MAX_ROADS) break;
-    }
-  }
-
-  const water: WaterFeature[] = [];
-  if (opts.includeWater) {
-    const usedWaterWays = new Set<number>();
-    const pushWater = (ringsLonLat: [number, number][][]) => {
-      const rings: [number, number][][] = [];
-      for (const r of ringsLonLat) {
-        const pr = prepareRing(r, origin.lon, origin.lat, true);
-        if (pr && ringArea(pr) > 40) rings.push(pr);
-      }
-      if (rings.length) water.push({ rings });
-    };
-
-    for (const rel of relations) {
-      const tags = rel.tags ?? {};
-      const isWater =
-        tags.natural === "water" ||
-        tags.waterway === "riverbank" ||
-        tags.landuse === "reservoir" ||
-        Boolean(tags.water);
-      if (!isWater) continue;
-      const outers: [number, number][][] = [];
-      for (const m of rel.members ?? []) {
-        if (m.type !== "way" || m.role === "inner") continue;
-        const way = ways.get(m.ref);
-        if (!way) continue;
-        const coords = wayCoords(way, nodes);
-        if (!coords) continue;
-        usedWaterWays.add(way.id);
-        outers.push(coords);
-      }
-      for (const ring of joinWays(outers)) pushWater([ring]);
-      if (water.length >= cfg.MAX_WATER) break;
-    }
-
-    if (water.length < cfg.MAX_WATER) {
-      for (const way of ways.values()) {
-        if (usedWaterWays.has(way.id)) continue;
-        const tags = way.tags ?? {};
-        const isWater =
-          tags.natural === "water" ||
-          tags.waterway === "riverbank" ||
-          tags.landuse === "reservoir" ||
-          Boolean(tags.water);
-        if (!isWater) continue;
-        const coords = wayCoords(way, nodes);
-        if (!coords || coords.length < 4) continue;
-        pushWater([coords]);
-        if (water.length >= cfg.MAX_WATER) break;
-      }
-    }
-  }
-
-  // Ports, quays, breakwaters, piers, marinas, harbours, docks, groynes,
-  // slipways — waterfront infrastructure kept as its own layer, separate
-  // from generic water polygons.
-  const ports: PortFeature[] = [];
-  if (opts.includeWater) {
-    const usedPortWays = new Set<number>();
-
-    const portKind = (tags: OsmTags): PortFeature["kind"] | null => {
-      if (tags.man_made === "pier") return "pier";
-      if (tags.man_made === "breakwater") return "breakwater";
-      if (tags.man_made === "groyne") return "groyne";
-      if (tags.man_made === "quay") return "quay";
-      if (tags.man_made === "dock") return "dock";
-      if (tags.leisure === "marina") return "marina";
-      if (tags.harbour) return "harbour";
-      if (tags.slipway === "yes" || tags.man_made === "slipway") return "slipway";
-      return null;
-    };
-
-    // Line-shaped structures: piers, breakwaters, groynes, slipways.
-    const lineKinds = new Set(["pier", "breakwater", "groyne", "slipway"]);
-
-    for (const way of ways.values()) {
-      const tags = way.tags ?? {};
-      const kind = portKind(tags);
-      if (!kind) continue;
-      const coords = wayCoords(way, nodes);
-      if (!coords) continue;
-
-      if (lineKinds.has(kind) && tags.area !== "yes") {
-        const path = uniqueRing(
-          coords.map(([lon, lat]) => {
-            const [x, z] = project(lon, lat, origin.lon, origin.lat);
-            return [roundMeters(x), roundMeters(z)] as [number, number];
-          }),
-        );
-        const simplified = simplifyRing(path, cfg.SIMPLIFY_TOLERANCE);
-        if (simplified.length < 2) continue;
-        if (pathLength(simplified) < cfg.MIN_ROAD_LENGTH) continue;
-        ports.push({
-          kind,
-          shape: "line",
-          path: simplified,
-          width: cfg.PORT_WIDTH_MAP[kind] ?? 4,
-        });
-      } else {
-        // Area-shaped: quays, docks, marina basins, harbour grounds.
-        if (coords.length < 4) continue;
-        usedPortWays.add(way.id);
-        const ring = prepareRing(coords, origin.lon, origin.lat, true);
-        if (!ring || ringArea(ring) < 20) continue;
-        ports.push({ kind, shape: "area", ring });
-      }
-      if (ports.length >= cfg.MAX_PORT) break;
-    }
-
-    if (ports.length < cfg.MAX_PORT) {
-      for (const rel of relations) {
-        const tags = rel.tags ?? {};
-        const kind = portKind(tags);
-        if (!kind || lineKinds.has(kind)) continue;
-        const outers: [number, number][][] = [];
-        for (const m of rel.members ?? []) {
-          if (m.type !== "way" || m.role === "inner") continue;
-          const way = ways.get(m.ref);
-          if (!way || usedPortWays.has(way.id)) continue;
-          const coords = wayCoords(way, nodes);
-          if (!coords) continue;
-          outers.push(coords);
-        }
-        for (const ring of joinWays(outers)) {
-          const pr = prepareRing(ring, origin.lon, origin.lat, true);
-          if (pr && ringArea(pr) >= 20) ports.push({ kind, shape: "area", ring: pr });
-          if (ports.length >= cfg.MAX_PORT) break;
-        }
-        if (ports.length >= cfg.MAX_PORT) break;
-      }
-    }
-  }
-
-  // Coastline: the real land/sea boundary, reconstructed independently of
-  // any water polygon so the shoreline itself is precise.
-  const coastline: CoastlineFeature[] = [];
-  if (opts.includeWater) {
-    const rawChains: [number, number][][] = [];
-    for (const way of ways.values()) {
-      if (way.tags?.natural !== "coastline") continue;
-      const coords = wayCoords(way, nodes);
-      if (!coords) continue;
-      rawChains.push(coords);
-    }
-    for (const chain of joinWays(rawChains)) {
-      const path = projectRing(chain, origin.lon, origin.lat);
-      const simplified = simplifyRing(path, cfg.SIMPLIFY_TOLERANCE);
-      if (simplified.length < 2) continue;
-      coastline.push({ path: simplified });
-      if (coastline.length >= cfg.MAX_COASTLINE) break;
-    }
-  }
-
   let minX = Infinity,
     maxX = -Infinity,
     minZ = Infinity,
@@ -385,13 +204,6 @@ export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts:
     if (z > maxZ) maxZ = z;
   };
   for (const b of clippedBuildings) for (const p of b.ring) consider(p[0], p[1]);
-  for (const r of roads) for (const p of r.path) consider(p[0], p[1]);
-  for (const w of water) for (const ring of w.rings) for (const p of ring) consider(p[0], p[1]);
-  for (const p of ports) {
-    if (p.path) for (const pt of p.path) consider(pt[0], pt[1]);
-    if (p.ring) for (const pt of p.ring) consider(pt[0], pt[1]);
-  }
-  for (const c of coastline) for (const p of c.path) consider(p[0], p[1]);
 
   const { width, depth } = (() => {
     const w = (bbox.maxLon - bbox.minLon) * 111320 * Math.cos((origin.lat * Math.PI) / 180);
@@ -411,10 +223,6 @@ export function parseOsm(json: OsmResponse, bbox: BBox, placeName: string, opts:
     bbox,
     placeName,
     buildings: clippedBuildings,
-    roads,
-    water,
-    ports,
-    coastline,
     extent: { minX, maxX, minZ, maxZ },
   };
 }

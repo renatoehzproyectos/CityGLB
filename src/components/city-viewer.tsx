@@ -1,4 +1,4 @@
-import type { RomeOptions } from "@/lib/city/build-scene";
+import type { RealisticOptions } from "@/lib/city/build-scene";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CityData, CityStats } from "@/lib/city/types";
 import { bboxSizeMeters } from "@/lib/city/geo";
@@ -17,20 +17,14 @@ import { useStudio } from "@/store/studio";
 
 type Layers = {
   buildings: boolean;
-  roads: boolean;
-  water: boolean;
   terrain: boolean;
-  trees: boolean;
 };
 
 type Props = {
   city: CityData | null;
-  autoRotate: boolean;
   layers: Layers;
-  treeDensity?: number;
   satellite?: boolean;
-  landCover?: boolean;
-  rome?: RomeOptions;
+  realistic?: RealisticOptions;
   onReady: (stats: CityStats) => void;
   onError: (message: string) => void;
   onExportReady: (exportFn: (() => Promise<void>) | null) => void;
@@ -39,49 +33,34 @@ type Props = {
 
 export function CityViewer({
   city,
-  autoRotate,
   layers,
-  treeDensity = 0.00008,
   satellite = false,
-  landCover = false,
-  rome,
+  realistic,
   onReady,
   onError,
   onExportReady,
   className,
 }: Props) {
-  const romeRef = useRef(rome);
-  romeRef.current = rome;
-  const romeKey = rome ? JSON.stringify(rome) : "";
+  const realisticRef = useRef(realistic);
+  realisticRef.current = realistic;
+  const realisticKey = realistic ? JSON.stringify(realistic) : "";
   const setMeshProgress = useStudio((s) => s.setMeshProgress);
   const hostRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef(layers);
-  const autoRef = useRef(autoRotate);
   const onReadyRef = useRef(onReady);
   const onErrorRef = useRef(onError);
   const onExportReadyRef = useRef(onExportReady);
   layersRef.current = layers;
-  autoRef.current = autoRotate;
   onReadyRef.current = onReady;
   onErrorRef.current = onError;
   onExportReadyRef.current = onExportReady;
 
   const applyLayersRef = useRef<((l: Layers) => void) | null>(null);
-  const setRotateRef = useRef<((on: boolean) => void) | null>(null);
 
-  const [debouncedTreeDensity, setDebouncedTreeDensity] = useState(treeDensity);
-  useEffect(() => {
-    const id = setTimeout(() => setDebouncedTreeDensity(treeDensity), 250);
-    return () => clearTimeout(id);
-  }, [treeDensity]);
 
   useEffect(() => {
     applyLayersRef.current?.(layers);
   }, [layers]);
-
-  useEffect(() => {
-    setRotateRef.current?.(autoRotate);
-  }, [autoRotate]);
 
   // Play mode lives outside the mesh-rebuild effect so switching car/plane
   // does not recreate the WebGL context.
@@ -172,7 +151,7 @@ export function CityViewer({
       grad.addColorStop(1, "#eef3f2"); // horizon
       skyCtx.fillStyle = grad;
       skyCtx.fillRect(0, 0, 2, 128);
-      const atmosphere = Boolean(romeRef.current?.atmosphere);
+      const atmosphere = Boolean(realisticRef.current?.atmosphere);
       let skyTex: import("three").Texture;
       if (atmosphere) {
         const { createSkyTexture } = await import("@/lib/city/sky");
@@ -229,7 +208,7 @@ export function CityViewer({
         });
       if (!renderer) {
         onErrorRef.current(
-          "WebGL failed to start (GPU context limit). Try a smaller area, turn off trees/satellite, or reload the page.",
+          "WebGL failed to start (GPU context limit). Try a smaller area, turn off satellite, or reload the page.",
         );
         return;
       }
@@ -276,20 +255,18 @@ export function CityViewer({
         dir.shadow.bias = -0.0006;
         dir.shadow.normalBias = 0.4;
       }
-      // Stronger ambient so satellite / land-cover albedo stays readable from above
+      // Stronger ambient so satellite albedo stays readable from above
       // (ACES tone-mapping otherwise crushes photo textures into mud).
-      scene.add(new THREE.AmbientLight(0xffffff, satellite || landCover ? 0.35 : 0.22));
-      if (satellite || landCover) {
+      scene.add(new THREE.AmbientLight(0xffffff, satellite ? 0.35 : 0.22));
+      if (satellite) {
         renderer.toneMappingExposure = 1.2;
       }
 
       let meshes: Awaited<ReturnType<typeof buildCityMeshes>>;
       try {
         meshes = await buildCityMeshes(city, {
-          treeDensity: debouncedTreeDensity,
           satellite,
-          landCover,
-          rome: romeRef.current,
+          realistic: realisticRef.current,
           onProgress: (fraction, label) => setMeshProgress(fraction, label),
         });
       } catch (err) {
@@ -300,16 +277,10 @@ export function CityViewer({
         return;
       }
       scene.add(meshes.group);
-      if (meshes.labels) scene.add(meshes.labels);
 
       const applyLayers = (l: Layers) => {
-        if (meshes.buildings) meshes.buildings.visible = l.buildings;
+        for (const m of meshes.buildings) m.visible = l.buildings;
         if (meshes.roofs) meshes.roofs.visible = l.buildings;
-        if (meshes.trees) meshes.trees.visible = l.trees;
-        if (meshes.roads) meshes.roads.visible = l.roads;
-        if (meshes.water) meshes.water.visible = l.water;
-        if (meshes.ports) meshes.ports.visible = l.water;
-        if (meshes.coastline) meshes.coastline.visible = l.water;
         meshes.terrain.visible = l.terrain;
       };
       applyLayers(layersRef.current);
@@ -322,12 +293,7 @@ export function CityViewer({
       orbit.maxPolarAngle = Math.PI * 0.49;
       orbit.minDistance = 20;
       orbit.maxDistance = span * 4;
-      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      orbit.autoRotate = autoRef.current && !reduced;
-      orbit.autoRotateSpeed = 0.45;
-      setRotateRef.current = (on) => {
-        orbit.autoRotate = on && !reduced && playModeRef.current === "orbit";
-      };
+      orbit.autoRotate = false;
 
       // Spawn marker (visible in pick phase)
       const markerGeo = new THREE.SphereGeometry(1.2, 12, 12);
@@ -376,7 +342,6 @@ export function CityViewer({
         vehicleRef.current = vehicle;
         spawnMarker.visible = false;
         orbit.enabled = false;
-        orbit.autoRotate = false;
         setPhase("drive");
         phaseRef.current = "drive";
         inputRef.current = { ...EMPTY_INPUT };
@@ -461,7 +426,6 @@ export function CityViewer({
         vehicleRef.current = null;
         sceneApiRef.current = null;
         applyLayersRef.current = null;
-        setRotateRef.current = null;
         markerGeo.dispose();
         markerMat.dispose();
         skyGeo.dispose();
@@ -481,7 +445,7 @@ export function CityViewer({
       onExportReadyRef.current(null);
       cleanup();
     };
-  }, [city, debouncedTreeDensity, satellite, landCover, romeKey]);
+  }, [city, satellite, realisticKey]);
 
   if (!city) {
     return (

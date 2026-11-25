@@ -10,8 +10,6 @@ const FetchInput = z.object({
   minLat: z.number(),
   maxLon: z.number(),
   maxLat: z.number(),
-  includeRoads: z.boolean(),
-  includeWater: z.boolean(),
   placeName: z.string().max(120).optional(),
 });
 
@@ -31,8 +29,6 @@ export const fetchCity = createServerFn({ method: "POST" })
     const err = validateBBox(bbox);
     if (err) throw new Error(err);
     return fetchOverpassCity(bbox, {
-      includeRoads: data.includeRoads,
-      includeWater: data.includeWater,
       placeName: data.placeName?.trim() || "Custom area",
     });
   });

@@ -6,8 +6,6 @@ import {
   OVERTURE_RELEASE,
   overtureToCityData,
   type OvertureBuildingCollection,
-  type OvertureSegmentCollection,
-  type OvertureWaterCollection,
 } from "./parse-overture";
 import type { BBox, CityData } from "./types";
 
@@ -16,8 +14,6 @@ const FetchInput = z.object({
   minLat: z.number(),
   maxLon: z.number(),
   maxLat: z.number(),
-  includeRoads: z.boolean().optional(),
-  includeWater: z.boolean().optional(),
   placeName: z.string().max(120).optional(),
 });
 
@@ -384,87 +380,15 @@ async function queryOvertureBuildings(bbox: BBox, release = OVERTURE_RELEASE): P
   return result;
 }
 
-async function queryOvertureSegments(bbox: BBox, release = OVERTURE_RELEASE): Promise<OvertureSegmentCollection> {
-  release = await resolveRelease(release);
-  const key = cacheKey("segments", bbox, release);
-  const cached = cacheGet<OvertureSegmentCollection>(key);
-  if (cached) return cached;
-
-  const rows = await runOvertureQuery(
-    "transportation",
-    "segment",
-    release,
-    ["id", "subtype", "class", "geometry"],
-    bbox,
-    cfg.MAX_ROADS * 2,
-    { subtype: { $eq: "road" } },
-  );
-
-  const features: OvertureSegmentCollection["features"] = [];
-  for (const row of rows) {
-    const geometry = asGeoJsonGeometry(row.geometry);
-    if (!geometry) continue;
-    if (geometry.type !== "LineString" && geometry.type !== "MultiLineString") continue;
-    features.push({
-      type: "Feature",
-      geometry: geometry as any,
-      properties: {
-        id: row.id as string,
-        subtype: (row.subtype as string | null) ?? null,
-        class: (row.class as string | null) ?? null,
-      },
-    });
-  }
-  const result: OvertureSegmentCollection = { type: "FeatureCollection", features };
-  cacheSet(key, result);
-  return result;
-}
-
-async function queryOvertureWater(bbox: BBox, release = OVERTURE_RELEASE): Promise<OvertureWaterCollection> {
-  release = await resolveRelease(release);
-  const key = cacheKey("water", bbox, release);
-  const cached = cacheGet<OvertureWaterCollection>(key);
-  if (cached) return cached;
-
-  const rows = await runOvertureQuery(
-    "base",
-    "water",
-    release,
-    ["id", "subtype", "geometry"],
-    bbox,
-    cfg.MAX_WATER * 2,
-  );
-
-  const features: OvertureWaterCollection["features"] = [];
-  for (const row of rows) {
-    const geometry = asGeoJsonGeometry(row.geometry);
-    if (!geometry) continue;
-    if (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") continue;
-    features.push({
-      type: "Feature",
-      geometry: geometry as any,
-      properties: {
-        id: row.id as string,
-        subtype: (row.subtype as string | null) ?? null,
-      },
-    });
-  }
-  const result: OvertureWaterCollection = { type: "FeatureCollection", features };
-  cacheSet(key, result);
-  return result;
-}
-
 export async function fetchOvertureCity(
   bbox: BBox,
-  opts: { placeName: string; includeRoads?: boolean; includeWater?: boolean; release?: string },
+  opts: { placeName: string; release?: string },
 ): Promise<CityData> {
   const buildings = await queryOvertureBuildings(bbox, opts.release);
-  const segments = opts.includeRoads ? await queryOvertureSegments(bbox, opts.release) : undefined;
-  const water = opts.includeWater ? await queryOvertureWater(bbox, opts.release) : undefined;
-  return overtureToCityData(buildings, bbox, opts.placeName, { segments, water });
+  return overtureToCityData(buildings, bbox, opts.placeName);
 }
 
-/** Full one-shot fetch (kept for compatibility). Prefer staged layer fetches for progress. */
+/** Full one-shot fetch (kept for compatibility). */
 export const fetchOvertureCityFn = createServerFn({ method: "POST" })
   .validator((data) => FetchInput.parse(data))
   .handler(async ({ data }) => {
@@ -477,11 +401,7 @@ export const fetchOvertureCityFn = createServerFn({ method: "POST" })
     const err = validateBBox(bbox);
     if (err) throw new Error(err);
     try {
-      return await fetchOvertureCity(bbox, {
-        placeName: data.placeName?.trim() || "Custom area",
-        includeRoads: data.includeRoads,
-        includeWater: data.includeWater,
-      });
+      return await fetchOvertureCity(bbox, { placeName: data.placeName?.trim() || "Custom area" });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`Overture Maps did not respond (${msg}). Try again in a moment.`);
@@ -494,18 +414,15 @@ const LayerInput = z.object({
   maxLon: z.number(),
   maxLat: z.number(),
   placeName: z.string().max(120).optional(),
-  layer: z.enum(["buildings", "roads", "water", "assemble"]),
-  /** Only used for the assemble step — pass previous layer payloads. */
-  includeRoads: z.boolean().optional(),
-  includeWater: z.boolean().optional(),
+  layer: z.enum(["buildings", "assemble", "tile"]),
+  /** layer=tile: fracciones (u: oeste→este, w: norte→sur) de la caja global. */
+  tile: z.object({ u0: z.number(), u1: z.number(), w0: z.number(), w1: z.number() }).optional(),
 });
 
 /**
- * Staged Overture fetch so the client can drive an honest progress bar:
- *   1. layer=buildings → FeatureCollection
- *   2. layer=roads     → FeatureCollection | null
- *   3. layer=water     → FeatureCollection | null
- *   4. layer=assemble  → CityData (clips + projects everything)
+ *   layer=buildings → solo cuenta edificios (los deja en caché del servidor)
+ *   layer=assemble  → CityData completo (recorta y proyecta)
+ *   layer=tile      → CityData de una tesela (respuestas pequeñas; ver tiles.ts)
  */
 export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
   .validator((data) => LayerInput.parse(data))
@@ -521,28 +438,34 @@ export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
     const placeName = data.placeName?.trim() || "Custom area";
 
     try {
-      // Las capas se quedan en la caché del servidor y solo devuelven un conteo:
-      // antes viajaban decenas de MB al cliente y de vuelta para ensamblar.
       if (data.layer === "buildings") {
         const fc = await queryOvertureBuildings(bbox);
         return { count: fc.features.length };
       }
-      if (data.layer === "roads") {
-        const fc = await queryOvertureSegments(bbox);
-        return { count: fc.features.length };
+      if (data.layer === "tile" && data.tile) {
+        const { u0, u1, w0, w1 } = data.tile;
+        const lonSpan = bbox.maxLon - bbox.minLon, latSpan = bbox.maxLat - bbox.minLat;
+        const tb: BBox = {
+          minLon: bbox.minLon + u0 * lonSpan, maxLon: bbox.minLon + u1 * lonSpan,
+          maxLat: bbox.maxLat - w0 * latSpan, minLat: bbox.maxLat - w1 * latSpan,
+        };
+        // Proyecta/recorta contra la caja GLOBAL (mismo origen para todas las teselas)...
+        const city = overtureToCityData(await queryOvertureBuildings(tb), bbox, placeName);
+        const W = city.extent.maxX - city.extent.minX, D = city.extent.maxZ - city.extent.minZ;
+        const inTile = (x: number, z: number) => {
+          const u = (x - city.extent.minX) / W, v = (z - city.extent.minZ) / D; // v: 0 = norte
+          return u >= u0 && (u < u1 || u1 >= 1 - 1e-9) && v >= w0 && (v < w1 || w1 >= 1 - 1e-9);
+        };
+        // ...y cada edificio se queda en UNA sola tesela (por centroide): sin duplicados al fusionar.
+        city.buildings = city.buildings.filter((f) => {
+          let x = 0, z = 0;
+          for (const p of f.ring) { x += p[0]; z += p[1]; }
+          return inTile(x / f.ring.length, z / f.ring.length);
+        });
+        if (JSON.stringify(city).length > 3_400_000) throw new Error("TILE_TOO_BIG");
+        return city;
       }
-      if (data.layer === "water") {
-        const fc = await queryOvertureWater(bbox);
-        return { count: fc.features.length };
-      }
-      // assemble
-      // Las tres capas en paralelo (antes: una tras otra, tres viajes al servidor).
-      const [buildings, segments, water] = await Promise.all([
-        queryOvertureBuildings(bbox),
-        data.includeRoads ? queryOvertureSegments(bbox) : Promise.resolve(undefined),
-        data.includeWater ? queryOvertureWater(bbox) : Promise.resolve(undefined),
-      ]);
-      return overtureToCityData(buildings, bbox, placeName, { segments, water });
+      return overtureToCityData(await queryOvertureBuildings(bbox), bbox, placeName);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`Overture Maps did not respond (${msg}). Try again in a moment.`);

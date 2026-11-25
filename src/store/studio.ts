@@ -3,17 +3,17 @@ import { fetchOvertureLayerFn } from "@/lib/city/fetch-overture";
 import { bboxFromCenter, bboxSizeMeters, formatSpan, normalizeBBox, validateBBox } from "@/lib/city/geo";
 import { cfg } from "@/lib/city/config";
 import { DEFAULT_PRESET } from "@/lib/city/presets";
-import type { RomeOptions } from "@/lib/city/build-scene";
+import type { RealisticOptions } from "@/lib/city/build-scene";
 import type { BBox, CityData, CityStats, PlaceHit, StudioStatus } from "@/lib/city/types";
 import { searchPlaces, fetchCity } from "@/lib/city/fetch-city";
 import { getCityAssets } from "@/lib/city/prefetch";
+import { fetchCityTiled } from "@/lib/city/tiles";
+import { enrichBuildingsWithAI } from "@/lib/city/ai-enrich";
+import { toast } from "sonner";
 
 type Layers = {
   buildings: boolean;
-  roads: boolean;
-  water: boolean;
   terrain: boolean;
-  trees: boolean;
 };
 
 type StudioState = {
@@ -22,31 +22,22 @@ type StudioState = {
   placeName: string;
   drawMode: boolean;
   focusSerial: number;
-  includeRoads: boolean;
-  includeWater: boolean;
-  autoRotate: boolean;
   view: "map" | "model";
   status: StudioStatus;
   error: string | null;
   city: CityData | null;
   stats: CityStats | null;
   layers: Layers;
-  /** Trees per m² used when meshing (0 = none). */
-  treeDensity: number;
   /** Drape free Esri World Imagery on the terrain (no API key). */
   satellite: boolean;
-  /**
-   * Drape ESA WorldCover land-cover classification on the terrain (no API
-   * key) — the ground's biological/physical material (tree cover,
-   * grassland, cropland, built-up, water, etc). Takes priority over
-   * `satellite` and also gates where trees can be placed.
-   */
-  landCover: boolean;
-  /** Modo Roma: monumentos, Cinzel, estatuas, PBR, SRTM, satélite HD. */
-  rome: RomeOptions;
-  setRome: (partial: Partial<RomeOptions>) => void;
-  /** Activa todo el modo Roma (y satélite). */
-  setRomeMode: (on: boolean) => void;
+  /** IA de visión: altura, techo, color y material de edificios desde la imagen aérea. */
+  aiBuildings: boolean;
+  setAiBuildings: (on: boolean) => void;
+  /** Modo realista: satélite HD y cielo. */
+  realistic: RealisticOptions;
+  setRealistic: (partial: Partial<RealisticOptions>) => void;
+  /** Activa todo el modo realista (y satélite). */
+  setRealisticMode: (on: boolean) => void;
   searchQuery: string;
   searchResults: PlaceHit[];
   searching: boolean;
@@ -57,14 +48,9 @@ type StudioState = {
   setBbox: (bbox: BBox, placeName?: string) => void;
   setBoxSizeM: (sizeM: number) => void;
   setDrawMode: (on: boolean) => void;
-  setIncludeRoads: (on: boolean) => void;
-  setIncludeWater: (on: boolean) => void;
-  setAutoRotate: (on: boolean) => void;
   setView: (view: "map" | "model") => void;
   setLayers: (partial: Partial<Layers>) => void;
-  setTreeDensity: (density: number) => void;
   setSatellite: (on: boolean) => void;
-  setLandCover: (on: boolean) => void;
   setSearchQuery: (q: string) => void;
   runSearch: () => Promise<void>;
   applyPlace: (place: PlaceHit) => void;
@@ -75,8 +61,8 @@ type StudioState = {
   setMeshProgress: (fraction: number, label: string) => void;
 };
 
-const ROME_OFF: RomeOptions = { landmarks: false, labels: false, statues: false, pbr: false, srtm: false, hdSatellite: false, vegetation: false, atmosphere: false, warmBuildings: false };
-const ROME_ON: RomeOptions = { landmarks: true, labels: true, statues: true, pbr: true, srtm: true, hdSatellite: true, vegetation: true, atmosphere: true, warmBuildings: true };
+const REALISTIC_OFF: RealisticOptions = { hdSatellite: false, atmosphere: false };
+const REALISTIC_ON: RealisticOptions = { hdSatellite: true, atmosphere: true };
 
 function spanOf(bbox: BBox): number {
   const { width, depth } = bboxSizeMeters(bbox);
@@ -89,25 +75,21 @@ export const useStudio = create<StudioState>((set, get) => ({
   placeName: `${DEFAULT_PRESET.name}, ${DEFAULT_PRESET.city}`,
   drawMode: false,
   focusSerial: 1,
-  includeRoads: true,
-  includeWater: true,
-  autoRotate: false,
   view: "map",
   status: "idle",
   error: null,
   city: null,
   stats: null,
-  layers: { buildings: true, roads: true, water: true, terrain: true, trees: true },
-  treeDensity: cfg.TREE_DENSITY,
+  layers: { buildings: true, terrain: true },
   satellite: false,
-  landCover: false,
-  rome: ROME_OFF,
-  setRome: (partial) => set((s) => ({ rome: { ...s.rome, ...partial } })),
-  setRomeMode: (on) =>
+  aiBuildings: false,
+  setAiBuildings: (on) => set({ aiBuildings: on }),
+  realistic: REALISTIC_OFF,
+  setRealistic: (partial) => set((s) => ({ realistic: { ...s.realistic, ...partial } })),
+  setRealisticMode: (on) =>
     set((s) => ({
-      rome: on ? ROME_ON : ROME_OFF,
+      realistic: on ? REALISTIC_ON : REALISTIC_OFF,
       satellite: on ? true : s.satellite,
-      landCover: on ? false : s.landCover,
     })),
   searchQuery: "",
   searchResults: [],
@@ -144,14 +126,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   setDrawMode: (on) => set({ drawMode: on }),
-  setIncludeRoads: (on) => set({ includeRoads: on }),
-  setIncludeWater: (on) => set({ includeWater: on }),
-  setAutoRotate: (on) => set({ autoRotate: on }),
   setView: (view) => set({ view }),
   setLayers: (partial) => set((s) => ({ layers: { ...s.layers, ...partial } })),
-  setTreeDensity: (density) => set({ treeDensity: Math.max(0, density) }),
   setSatellite: (on) => set({ satellite: on }),
-  setLandCover: (on) => set({ landCover: on }),
   setSearchQuery: (q) => set({ searchQuery: q }),
 
   runSearch: async () => {
@@ -189,7 +166,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   generate: async () => {
-    const { bbox, includeRoads, includeWater, placeName } = get();
+    const { bbox, placeName } = get();
     const box = normalizeBBox(bbox);
     const err = validateBBox(box);
     if (err) {
@@ -220,18 +197,26 @@ export const useStudio = create<StudioState>((set, get) => ({
         const st = get();
         void getCityAssets(box, {
           satellite: st.satellite,
-          landCover: st.landCover,
-          hdSatellite: st.rome.hdSatellite,
-          pbr: st.rome.pbr,
+          hdSatellite: st.realistic.hdSatellite,
           flatTerrain: false,
         });
       }
 
       // Una sola petición: el servidor consulta edificios, calles y agua en paralelo.
-      set({ progress: 8, progressLabel: "Loading buildings, roads & water…" });
-      let data = (await fetchOvertureLayerFn({
-        data: { ...base, layer: "assemble", includeRoads, includeWater },
-      })) as CityData;
+      set({ progress: 8, progressLabel: "Loading buildings…" });
+      const { width, depth } = bboxSizeMeters(box);
+      let data = await fetchCityTiled(
+        (tile) =>
+          fetchOvertureLayerFn({
+            data: { ...base, layer: "tile", tile },
+          }) as Promise<CityData>,
+        Math.max(width, depth),
+        (done, total) =>
+          set({
+            progress: 8 + Math.round((done / total) * 32),
+            progressLabel: `Loading city tiles ${done}/${total}…`,
+          }),
+      );
       const overtureBuildings = data?.buildings?.length ?? 0;
 
       // Respaldo: si Overture no dio edificios, probar OpenStreetMap (Overpass).
@@ -240,7 +225,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         set({ progress: 42, progressLabel: "Overture sin edificios; probando OpenStreetMap…" });
         try {
           const osm = (await fetchCity({
-            data: { ...base, includeRoads, includeWater },
+            data: { ...base },
           })) as CityData;
           if (osm?.buildings?.length) data = osm;
         } catch (e) {
@@ -257,6 +242,33 @@ export const useStudio = create<StudioState>((set, get) => ({
       if (!data || !data.extent) {
         throw new Error("No map data returned for this area.");
       }
+      if (get().aiBuildings) {
+        try {
+          set({ progress: 40, progressLabel: "IA: preparando imagen aérea…" });
+          const st = get();
+          const sat = await getCityAssets(box, {
+            satellite: true,
+            hdSatellite: st.satellite && st.realistic.hdSatellite,
+            flatTerrain: false,
+          }).sat;
+          if (!sat) {
+            toast.warning("IA de edificios: no se pudo descargar la imagen aérea. Se usan los datos estándar.");
+          } else {
+            const res = await enrichBuildingsWithAI(data, sat, {
+              onProgress: (done, total) =>
+                set({ progress: 40 + Math.round((done / Math.max(1, total)) * 5), progressLabel: `IA: analizando zonas ${done}/${total}…` }),
+            });
+            if (res.notConfigured) {
+              toast.warning("IA de edificios no configurada: define ANTHROPIC_API_KEY en el servidor. Se usan los datos estándar.");
+            } else if (res.warning) {
+              toast.warning(`IA de edificios: ${res.warning}`);
+            }
+          }
+        } catch (e) {
+          console.warn("[generate] IA de edificios falló", e);
+          toast.warning("IA de edificios falló; se usan los datos estándar.");
+        }
+      }
       set({
         city: data,
         status: "meshing",
@@ -267,7 +279,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     } catch (e) {
       set({
         status: "error",
-        error: e instanceof Error ? e.message : "Could not fetch map data.",
+        error: e instanceof Error && e.message ? e.message : typeof e === "string" && e ? e : "Could not fetch map data.",
         view: "map",
         progress: 0,
         progressLabel: "",

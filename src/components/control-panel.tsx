@@ -7,8 +7,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { CREDITS, ROME_PRESETS } from "@/lib/city/rome";
-import { SANTIAGO_PRESETS } from "@/lib/city/presets";
 import { Switch } from "@/components/ui/switch";
 import { bboxSizeMeters, formatSpan, validateBBox } from "@/lib/city/geo";
 import { cityFilename } from "@/lib/city/filename";
@@ -23,31 +21,23 @@ export function ControlPanel({ exportFn }: Props) {
   const bbox = useStudio((s) => s.bbox);
   const boxSizeM = useStudio((s) => s.boxSizeM);
   const placeName = useStudio((s) => s.placeName);
-  const includeRoads = useStudio((s) => s.includeRoads);
-  const includeWater = useStudio((s) => s.includeWater);
-  const autoRotate = useStudio((s) => s.autoRotate);
   const view = useStudio((s) => s.view);
   const status = useStudio((s) => s.status);
   const error = useStudio((s) => s.error);
   const stats = useStudio((s) => s.stats);
   const layers = useStudio((s) => s.layers);
-  const treeDensity = useStudio((s) => s.treeDensity);
   const satellite = useStudio((s) => s.satellite);
-  const landCover = useStudio((s) => s.landCover);
-  const rome = useStudio((s) => s.rome);
-  const setRome = useStudio((s) => s.setRome);
-  const setRomeMode = useStudio((s) => s.setRomeMode);
+  const aiBuildings = useStudio((s) => s.aiBuildings);
+  const setAiBuildings = useStudio((s) => s.setAiBuildings);
+  const realistic = useStudio((s) => s.realistic);
+  const setRealistic = useStudio((s) => s.setRealistic);
+  const setRealisticMode = useStudio((s) => s.setRealisticMode);
   const searchQuery = useStudio((s) => s.searchQuery);
   const searchResults = useStudio((s) => s.searchResults);
   const searching = useStudio((s) => s.searching);
-  const setIncludeRoads = useStudio((s) => s.setIncludeRoads);
-  const setIncludeWater = useStudio((s) => s.setIncludeWater);
-  const setAutoRotate = useStudio((s) => s.setAutoRotate);
   const setView = useStudio((s) => s.setView);
   const setLayers = useStudio((s) => s.setLayers);
-  const setTreeDensity = useStudio((s) => s.setTreeDensity);
   const setSatellite = useStudio((s) => s.setSatellite);
-  const setLandCover = useStudio((s) => s.setLandCover);
   const setSearchQuery = useStudio((s) => s.setSearchQuery);
   const runSearch = useStudio((s) => s.runSearch);
   const applyPlace = useStudio((s) => s.applyPlace);
@@ -181,16 +171,6 @@ export function ControlPanel({ exportFn }: Props) {
 
           <Separator />
 
-          <section className="flex flex-col gap-3">
-            <Label>Layers in the model</Label>
-            <RowSwitch label="Roads" checked={includeRoads} onCheckedChange={setIncludeRoads} />
-            <RowSwitch
-              label="Water, ports & coastline"
-              checked={includeWater}
-              onCheckedChange={setIncludeWater}
-            />
-          </section>
-
           {status === "ready" && stats && (
             <>
               <Separator />
@@ -199,14 +179,12 @@ export function ControlPanel({ exportFn }: Props) {
                 <dl className="grid grid-cols-2 gap-x-3 gap-y-2 font-mono text-xs tabular-nums text-fg">
                   <dt className="text-muted">Buildings</dt>
                   <dd className="text-right">{stats.buildings.toLocaleString()}</dd>
-                  <dt className="text-muted">Roads</dt>
-                  <dd className="text-right">{stats.roads.toLocaleString()}</dd>
-                  <dt className="text-muted">Water</dt>
-                  <dd className="text-right">{stats.water.toLocaleString()}</dd>
-                  <dt className="text-muted">Ports & coast</dt>
-                  <dd className="text-right">{stats.ports.toLocaleString()}</dd>
-                  <dt className="text-muted">Trees</dt>
-                  <dd className="text-right">{(stats.trees ?? 0).toLocaleString()}</dd>
+                  {(stats.aiBuildings ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">AI-enriched</dt>
+                      <dd className="text-right">{(stats.aiBuildings ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   <dt className="text-muted">Vertices</dt>
                   <dd className="text-right">{stats.vertices.toLocaleString()}</dd>
                 </dl>
@@ -217,125 +195,36 @@ export function ControlPanel({ exportFn }: Props) {
                     onCheckedChange={(on) => setLayers({ buildings: on })}
                   />
                   <RowSwitch
-                    label="Roads"
-                    checked={layers.roads}
-                    onCheckedChange={(on) => setLayers({ roads: on })}
-                  />
-                  <RowSwitch
-                    label="Water"
-                    checked={layers.water}
-                    onCheckedChange={(on) => setLayers({ water: on })}
-                  />
-                  <RowSwitch
                     label="Terrain"
                     checked={layers.terrain}
                     onCheckedChange={(on) => setLayers({ terrain: on })}
                   />
-                  <RowSwitch
-                    label="Trees"
-                    checked={layers.trees}
-                    onCheckedChange={(on) => setLayers({ trees: on })}
-                  />
                 </div>
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="tree-density">Trees density</Label>
-                    <span className="font-mono text-xs tabular-nums text-muted">
-                      {treeDensity === 0
-                        ? "off"
-                        : `${Math.round(treeDensity * 1e6)} /km²`}
-                    </span>
-                  </div>
-                  <input
-                    id="tree-density"
-                    type="range"
-                    min={0}
-                    max={2000}
-                    step={10}
-                    value={Math.round(treeDensity * 1e6)}
-                    onChange={(e) => setTreeDensity(Number(e.target.value) / 1e6)}
-                    className="h-2 w-full cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
-                  />
-                  <div className="flex justify-between text-[10px] text-subtle">
-                    <span>None</span>
-                    <span>2000 /km²</span>
-                  </div>
-                </div>
-                <RowSwitch label="Auto-rotate" checked={autoRotate} onCheckedChange={setAutoRotate} />
-                <RowSwitch
-                  label="Land cover material"
-                  checked={landCover}
-                  onCheckedChange={(on) => {
-                    setLandCover(on);
-                    if (on) setSatellite(false);
-                  }}
-                />
-                <p className="text-[10px] leading-snug text-subtle">
-                  ESA WorldCover 10m · no API key · classifies ground as tree cover, grassland,
-                  cropland, built-up, water, etc. — also keeps trees off built-up/water pixels.
-                  Takes priority over satellite terrain.
-                </p>
                 <RowSwitch
                   label="Satellite terrain"
                   checked={satellite}
-                  onCheckedChange={(on) => {
-                    setSatellite(on);
-                    if (on) setLandCover(false);
-                  }}
+                  onCheckedChange={setSatellite}
                 />
                 <p className="text-[10px] leading-snug text-subtle">
                   Esri World Imagery · no API key · remeshes the scene
                 </p>
+                <RowSwitch
+                  label="IA de edificios (altura, color, materiales)"
+                  checked={aiBuildings}
+                  onCheckedChange={setAiBuildings}
+                />
+                <p className="text-[10px] leading-snug text-subtle">
+                  Analiza la imagen aérea con visión por IA (hasta 800 edificios, los mayores primero) y solo
+                  completa lo que los datos no traen. Requiere ANTHROPIC_API_KEY en el servidor · regenera la escena.
+                </p>
                 <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3">
-                  <Label>Roma</Label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {ROME_PRESETS.map((p) => (
-                      <Button
-                        key={p.id}
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => {
-                          setBbox(p.bbox, `${p.name}, ${p.city}`);
-                          setRomeMode(true);
-                        }}
-                      >
-                        {p.name}
-                      </Button>
-                    ))}
-                  </div>
-                  <Label>Santiago de Chile</Label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {SANTIAGO_PRESETS.map((p) => (
-                      <Button
-                        key={p.id}
-                        type="button"
-                        size="sm"
-                        variant="secondary"
-                        onClick={() => {
-                          setBbox(p.bbox, `${p.name}, ${p.city}`);
-                          setRomeMode(true);
-                        }}
-                      >
-                        {p.name}
-                      </Button>
-                    ))}
-                  </div>
                   <RowSwitch
-                    label="Modo realista (satélite HD, PBR, SRTM, cielo; Roma suma monumentos)"
-                    checked={Object.values(rome).every(Boolean)}
-                    onCheckedChange={setRomeMode}
+                    label="Modo realista (satélite HD y cielo)"
+                    checked={Object.values(realistic).every(Boolean)}
+                    onCheckedChange={setRealisticMode}
                   />
-                  <RowSwitch label="Colosseo 3D" checked={rome.landmarks} onCheckedChange={(on) => setRome({ landmarks: on })} />
-                  <RowSwitch label="Rótulos Cinzel" checked={rome.labels} onCheckedChange={(on) => setRome({ labels: on })} />
-                  <RowSwitch label="Estatuas" checked={rome.statues} onCheckedChange={(on) => setRome({ statues: on })} />
-                  <RowSwitch label="Calles PBR (Poly Haven)" checked={rome.pbr} onCheckedChange={(on) => setRome({ pbr: on })} />
-                  <RowSwitch label="Elevación NASA SRTM" checked={rome.srtm} onCheckedChange={(on) => setRome({ srtm: on })} />
-                  <RowSwitch label="Pinos piñoneros densos" checked={rome.vegetation} onCheckedChange={(on) => setRome({ vegetation: on })} />
-                  <RowSwitch label="Cielo con nubes y luz cálida" checked={rome.atmosphere} onCheckedChange={(on) => setRome({ atmosphere: on })} />
-                  <RowSwitch label="Paleta y vegetación según la región" checked={rome.warmBuildings} onCheckedChange={(on) => setRome({ warmBuildings: on })} />
-                  <RowSwitch label="Satélite HD (4096 px)" checked={rome.hdSatellite} onCheckedChange={(on) => setRome({ hdSatellite: on })} />
-                  <p className="text-[10px] leading-snug text-subtle">{CREDITS}</p>
+                  <RowSwitch label="Cielo con nubes y luz cálida" checked={realistic.atmosphere} onCheckedChange={(on) => setRealistic({ atmosphere: on })} />
+                  <RowSwitch label="Satélite HD (4096 px)" checked={realistic.hdSatellite} onCheckedChange={(on) => setRealistic({ hdSatellite: on })} />
                 </div>
               </section>
             </>
