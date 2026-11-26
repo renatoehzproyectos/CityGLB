@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "input_size": 96,
+  "window_m": 96.0,
+  "roof_shapes": [
+    "flat",
+    "gabled",
+    "hipped",
+    "pyramidal",
+    "dome"
+  ],
+  "materials": [
+    "brick",
+    "concrete",
+    "glass",
+    "stucco",
+    "stone",
+    "metal",
+    "wood"
+  ],
+  "metrics": {
+    "height_mae_m": 5.78082799911499,
+    "height_within_30pct": 0.7068419385492556,
+    "height_n": 6314,
+    "roof_acc": 0.7832699619771863,
+    "roof_n": 263,
+    "material_acc": 0.7274725274725274,
+    "material_n": 455
+  }
+}

@@ -30,7 +30,7 @@ type StudioState = {
   layers: Layers;
   /** Drape free Esri World Imagery on the terrain (no API key). */
   satellite: boolean;
-  /** IA de visión: altura, techo, color y material de edificios desde la imagen aérea. */
+  /** Modelo propio (ONNX): altura, techo y material de edificios desde la imagen aérea. */
   aiBuildings: boolean;
   setAiBuildings: (on: boolean) => void;
   /** Modo realista: satélite HD y cielo. */
@@ -252,21 +252,21 @@ export const useStudio = create<StudioState>((set, get) => ({
             flatTerrain: false,
           }).sat;
           if (!sat) {
-            toast.warning("IA de edificios: no se pudo descargar la imagen aérea. Se usan los datos estándar.");
+            toast.warning("IA propia: no se pudo descargar la imagen aérea. Se usan los datos estándar.");
           } else {
             const res = await enrichBuildingsWithAI(data, sat, {
               onProgress: (done, total) =>
-                set({ progress: 40 + Math.round((done / Math.max(1, total)) * 5), progressLabel: `IA: analizando zonas ${done}/${total}…` }),
+                set({ progress: 40 + Math.round((done / Math.max(1, total)) * 5), progressLabel: `IA: analizando edificios ${done}/${total}…` }),
             });
-            if (res.notConfigured) {
-              toast.warning("IA de edificios no configurada: define ANTHROPIC_API_KEY en el servidor. Se usan los datos estándar.");
+            if (res.noModel) {
+              toast.warning("IA propia: no hay modelo en /models (building-net.onnx). Entrénalo con ml/ y cópialo. Se usan los datos estándar.");
             } else if (res.warning) {
-              toast.warning(`IA de edificios: ${res.warning}`);
+              toast.warning(`IA propia: ${res.warning}`);
             }
           }
         } catch (e) {
           console.warn("[generate] IA de edificios falló", e);
-          toast.warning("IA de edificios falló; se usan los datos estándar.");
+          toast.warning("IA propia falló; se usan los datos estándar.");
         }
       }
       set({

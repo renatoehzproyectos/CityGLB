@@ -1,0 +1,8 @@
+numpy
+pillow
+requests
+duckdb
+torch
+onnx
+onnxscript
+onnxruntime

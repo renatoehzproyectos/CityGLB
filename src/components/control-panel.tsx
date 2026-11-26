@@ -209,13 +209,13 @@ export function ControlPanel({ exportFn }: Props) {
                   Esri World Imagery · no API key · remeshes the scene
                 </p>
                 <RowSwitch
-                  label="IA de edificios (altura, color, materiales)"
+                  label="IA propia de edificios (altura, techo, material)"
                   checked={aiBuildings}
                   onCheckedChange={setAiBuildings}
                 />
                 <p className="text-[10px] leading-snug text-subtle">
-                  Analiza la imagen aérea con visión por IA (hasta 800 edificios, los mayores primero) y solo
-                  completa lo que los datos no traen. Requiere ANTHROPIC_API_KEY en el servidor · regenera la escena.
+                  Modelo entrenado por ustedes (ml/), ejecutado en el navegador sobre la imagen aérea. Solo
+                  completa lo que los datos no traen. Requiere public/models/building-net.onnx · regenera la escena.
                 </p>
                 <div className="mt-2 flex flex-col gap-2 border-t border-border pt-3">
                   <RowSwitch
