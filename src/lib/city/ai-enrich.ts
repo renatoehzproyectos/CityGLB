@@ -49,7 +49,7 @@ export async function enrichBuildingsWithAI(
       b.roof = { ...b.roof, shape: p.roof.cls };
       touched = true;
     }
-    if (p.material.p >= 0.45) {
+    if (p.material.p >= 0.3) {
       b.material = p.material.cls;
       touched = true;
     }

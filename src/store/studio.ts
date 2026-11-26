@@ -9,11 +9,15 @@ import { searchPlaces, fetchCity } from "@/lib/city/fetch-city";
 import { getCityAssets } from "@/lib/city/prefetch";
 import { fetchCityTiled } from "@/lib/city/tiles";
 import { enrichBuildingsWithAI } from "@/lib/city/ai-enrich";
+import { fetchLandLayersFn } from "@/lib/city/fetch-overture";
+import { attachLandData } from "@/lib/city/land-data";
 import { toast } from "sonner";
 
 type Layers = {
   buildings: boolean;
   terrain: boolean;
+  water: boolean;
+  vegetation: boolean;
 };
 
 type StudioState = {
@@ -80,11 +84,11 @@ export const useStudio = create<StudioState>((set, get) => ({
   error: null,
   city: null,
   stats: null,
-  layers: { buildings: true, terrain: true },
-  satellite: false,
-  aiBuildings: false,
+  layers: { buildings: true, terrain: true, water: true, vegetation: true },
+  satellite: true,
+  aiBuildings: true,
   setAiBuildings: (on) => set({ aiBuildings: on }),
-  realistic: REALISTIC_OFF,
+  realistic: REALISTIC_ON,
   setRealistic: (partial) => set((s) => ({ realistic: { ...s.realistic, ...partial } })),
   setRealisticMode: (on) =>
     set((s) => ({
@@ -241,6 +245,16 @@ export const useStudio = create<StudioState>((set, get) => ({
 
       if (!data || !data.extent) {
         throw new Error("No map data returned for this area.");
+      }
+      // Agua y árboles reales (opcional: si falla, se genera sin ellos)
+      try {
+        set({ progress: 39, progressLabel: "Cargando agua y vegetación…" });
+        const land = await fetchLandLayersFn({
+          data: { minLon: box.minLon, minLat: box.minLat, maxLon: box.maxLon, maxLat: box.maxLat },
+        });
+        attachLandData(data, land);
+      } catch (e) {
+        console.warn("[generate] agua/árboles no disponibles", e);
       }
       if (get().aiBuildings) {
         try {

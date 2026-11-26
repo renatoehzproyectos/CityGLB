@@ -66,8 +66,8 @@ function windows(
 }
 
 const darkGlass = (c: number, r: number) => {
-  const shade = 30 + ((c * 7 + r * 13) % 5) * 6;
-  return `rgb(${shade + 10},${shade + 18},${shade + 30})`;
+  const shade = 92 + ((c * 7 + r * 13) % 5) * 8;
+  return `rgb(${shade + 8},${shade + 18},${shade + 32})`;
 };
 
 const SPECS: Record<FacadeMaterial, Spec> = {

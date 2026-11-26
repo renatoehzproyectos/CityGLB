@@ -24,12 +24,22 @@ export type BuildingFeature = {
   ai?: boolean;
 };
 
+/** Cuerpo de agua real (Overture base/water), en metros locales. rings[0] = exterior, el resto islas. */
+export type WaterFeature = {
+  subtype: string;
+  rings: Ring[];
+};
+
 export type CityData = {
   origin: { lon: number; lat: number };
   bbox: BBox;
   placeName: string;
   buildings: BuildingFeature[];
   extent: { minX: number; maxX: number; minZ: number; maxZ: number };
+  /** Agua real (opcional: si falla la descarga, la escena sigue sin ella). */
+  water?: WaterFeature[];
+  /** Árboles individuales reales (OSM vía Overture), en metros locales. */
+  osmTrees?: [number, number][];
 };
 
 export type CityStats = {
@@ -37,6 +47,8 @@ export type CityStats = {
   vertices: number;
   /** Edificios con datos estimados por IA. */
   aiBuildings?: number;
+  trees?: number;
+  waterBodies?: number;
 };
 
 export type PlaceHit = {

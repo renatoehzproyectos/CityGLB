@@ -18,6 +18,8 @@ import { useStudio } from "@/store/studio";
 type Layers = {
   buildings: boolean;
   terrain: boolean;
+  water: boolean;
+  vegetation: boolean;
 };
 
 type Props = {
@@ -280,6 +282,8 @@ export function CityViewer({
 
       const applyLayers = (l: Layers) => {
         for (const m of meshes.buildings) m.visible = l.buildings;
+        if (meshes.water) meshes.water.visible = l.water;
+        if (meshes.trees) meshes.trees.visible = l.vegetation;
         if (meshes.roofs) meshes.roofs.visible = l.buildings;
         meshes.terrain.visible = l.terrain;
       };

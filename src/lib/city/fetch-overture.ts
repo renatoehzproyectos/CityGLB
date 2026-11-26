@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { normalizeBBox, validateBBox } from "./geo";
+import { clipPolygonToBox, normalizeBBox, validateBBox } from "./geo";
+import { simplifyRing } from "./simplify";
 import { cfg } from "./config";
 import {
   OVERTURE_RELEASE,
@@ -470,4 +471,96 @@ export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`Overture Maps did not respond (${msg}). Try again in a moment.`);
     }
+  });
+
+// ---------------------------------------------------------------------------
+// Agua y árboles reales (theme=base). Cada capa es independiente: si una falla,
+// la otra (y los edificios) siguen funcionando.
+// ---------------------------------------------------------------------------
+export type LandResponse = {
+  water: { s: string; r: [number, number][][] }[];
+  trees: [number, number][];
+};
+
+const LAND_MAX_VERTS = 40000;
+const landCache = new Map<string, { data: LandResponse; expiresAt: number }>();
+
+function round5(n: number): number {
+  return Math.round(n * 1e5) / 1e5;
+}
+
+async function queryLandLayers(bbox: BBox): Promise<LandResponse> {
+  const release = await resolveRelease(OVERTURE_RELEASE);
+  const key = cacheKey("land", bbox, release);
+  const hit = landCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.data;
+
+  const box = { minX: bbox.minLon, maxX: bbox.maxLon, minZ: bbox.minLat, maxZ: bbox.maxLat };
+  const out: LandResponse = { water: [], trees: [] };
+
+  // --- agua ---
+  try {
+    const rows = await runOvertureQuery("base", "water", release, ["id", "subtype", "class", "geometry"], bbox, 6000);
+    let tol = 2e-5; // ~2 m en grados
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const water: LandResponse["water"] = [];
+      let verts = 0;
+      for (const row of rows) {
+        const g = asGeoJsonGeometry(row.geometry);
+        if (!g || (g.type !== "Polygon" && g.type !== "MultiPolygon")) continue;
+        const polys = (g.type === "Polygon" ? [g.coordinates] : g.coordinates) as [number, number][][][];
+        for (const poly of polys) {
+          const outer = clipPolygonToBox(poly[0] as [number, number][], box);
+          if (!outer) continue;
+          const rings: [number, number][][] = [simplifyRing([...outer, outer[0]], tol).slice(0, -1)];
+          for (const h of poly.slice(1)) {
+            const hr = h as [number, number][];
+            if (hr.every(([x, y]) => x >= box.minX && x <= box.maxX && y >= box.minZ && y <= box.maxZ)) {
+              const sh = simplifyRing(hr, tol);
+              if (sh.length >= 4) rings.push(sh.slice(0, -1));
+            }
+          }
+          if (rings[0].length < 3) continue;
+          const r = rings.map((ring) => ring.map(([x, y]) => [round5(x), round5(y)] as [number, number]));
+          verts += r.reduce((n, ring) => n + ring.length, 0);
+          water.push({ s: String(row.subtype ?? row.class ?? "water"), r });
+        }
+      }
+      if (verts <= LAND_MAX_VERTS || attempt === 2) {
+        out.water = water;
+        break;
+      }
+      tol *= 3; // demasiado detalle para la respuesta: simplifica más
+    }
+  } catch (e) {
+    console.warn("[overture] base/water no disponible", e instanceof Error ? e.message : e);
+  }
+
+  // --- árboles individuales (puntos) ---
+  try {
+    const rows = await runOvertureQuery("base", "land", release, ["id", "subtype", "geometry"], bbox, 20000, {
+      subtype: { $eq: "tree" },
+    });
+    for (const row of rows) {
+      const g = asGeoJsonGeometry(row.geometry);
+      if (!g || g.type !== "Point") continue;
+      const [x, y] = g.coordinates as [number, number];
+      if (x >= box.minX && x <= box.maxX && y >= box.minZ && y <= box.maxZ) out.trees.push([round5(x), round5(y)]);
+    }
+  } catch (e) {
+    console.warn("[overture] base/land (árboles) no disponible", e instanceof Error ? e.message : e);
+  }
+
+  if (landCache.size >= 8) landCache.delete(landCache.keys().next().value as string);
+  landCache.set(key, { data: out, expiresAt: Date.now() + CACHE_TTL_MS });
+  return out;
+}
+
+export const fetchLandLayersFn = createServerFn({ method: "POST" })
+  .validator((data) => FetchInput.parse(data))
+  .handler(async ({ data }): Promise<LandResponse> => {
+    const bbox = normalizeBBox({ minLon: data.minLon, minLat: data.minLat, maxLon: data.maxLon, maxLat: data.maxLat });
+    const err = validateBBox(bbox);
+    if (err) throw new Error(err);
+    return queryLandLayers(bbox);
   });

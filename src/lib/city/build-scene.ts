@@ -8,6 +8,8 @@ import { fetchHeightGrid, sampleHeight, type HeightGrid } from "./elevation";
 import { buildSatelliteCanvas } from "./satellite";
 import { getCityAssets } from "./prefetch";
 import { MATERIAL_TINT, createFacadeMaterial } from "./facade-materials";
+import { buildWaterMesh } from "./water";
+import { buildTreesMesh, detectTrees } from "./vegetation";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
 import type { RGB, RoofShape } from "./roof-data";
 
@@ -501,8 +503,8 @@ function createWindowTexture(): THREE.Texture {
     for (let c = 0; c < cols; c++) {
       const x = c * padX + (padX - winW) / 2;
       const y = r * padY + (padY - winH) / 2;
-      const shade = 30 + Math.round(((c * 7 + r * 13) % 5) * 6); // subtle per-window variation
-      ctx.fillStyle = `rgb(${shade + 10}, ${shade + 18}, ${shade + 30})`;
+      const shade = 92 + Math.round(((c * 7 + r * 13) % 5) * 8); // vidrio gris azulado, no negro
+      ctx.fillStyle = `rgb(${shade + 8}, ${shade + 18}, ${shade + 32})`;
       ctx.fillRect(x, y, winW, winH);
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
       ctx.lineWidth = Math.max(1, size * 0.006);
@@ -593,7 +595,9 @@ export type CityMeshes = {
   buildings: THREE.Mesh[];
   roofs?: THREE.Mesh;
   terrain: THREE.Mesh;
-  stats: { buildings: number; vertices: number; aiBuildings: number };
+  water?: THREE.Mesh;
+  trees?: THREE.Mesh;
+  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; waterBodies: number };
   heightGrid?: HeightGrid | null;
 };
 
@@ -738,6 +742,42 @@ export async function buildCityMeshes(
     vertices += roofGeo.getAttribute("position").count;
   }
 
+  // Agua real y vegetación (cada una aislada: si falla, la escena sigue)
+  const groundAt = grid ? (x: number, z: number) => heightAtFeature(grid, x, z) : null;
+  let waterMesh: THREE.Mesh | undefined;
+  let waterBodies = 0;
+  if (data.water?.length) {
+    try {
+      onProgress?.(0.9, "Building water…");
+      const w = buildWaterMesh(data.water, data.extent, groundAt ?? (() => 0), roofSampler);
+      if (w) {
+        waterMesh = w.mesh;
+        waterBodies = w.count;
+        group.add(w.mesh);
+        vertices += w.mesh.geometry.getAttribute("position").count;
+      }
+    } catch (e) {
+      console.warn("Water failed", e);
+    }
+  }
+  let treesMesh: THREE.Mesh | undefined;
+  let treeCount = 0;
+  if (satCanvas || data.osmTrees?.length) {
+    try {
+      onProgress?.(0.94, "Placing vegetation…");
+      const trees = satCanvas ? detectTrees(satCanvas, data, roofSampler) : [];
+      const m = buildTreesMesh(trees, groundAt);
+      if (m) {
+        treesMesh = m;
+        treeCount = trees.length;
+        group.add(m);
+        vertices += m.geometry.getAttribute("position").count;
+      }
+    } catch (e) {
+      console.warn("Vegetation failed", e);
+    }
+  }
+
   onProgress?.(0.99, "Finalizing…");
 
   return {
@@ -745,10 +785,14 @@ export async function buildCityMeshes(
     buildings: buildingMeshes,
     roofs: roofsMesh,
     terrain: terrainMesh,
+    water: waterMesh,
+    trees: treesMesh,
     stats: {
       buildings: data.buildings.length,
       vertices,
       aiBuildings: data.buildings.reduce((n, b) => n + (b.ai ? 1 : 0), 0),
+      trees: treeCount,
+      waterBodies,
     },
     heightGrid: grid,
   };

@@ -1,0 +1,13 @@
+import { project, ringArea } from "./geo";
+import type { LandResponse } from "./fetch-overture";
+import type { CityData } from "./types";
+
+/** Proyecta agua y árboles (lon/lat) a metros locales y los adjunta al CityData. */
+export function attachLandData(data: CityData, land: LandResponse): void {
+  const { lon: oLon, lat: oLat } = data.origin;
+  const proj = (p: [number, number]): [number, number] => project(p[0], p[1], oLon, oLat);
+  data.water = land.water
+    .map((w) => ({ subtype: w.s, rings: w.r.map((ring) => ring.map(proj)) }))
+    .filter((w) => w.rings[0] && w.rings[0].length >= 3 && ringArea(w.rings[0]) >= 30);
+  data.osmTrees = land.trees.map(proj);
+}

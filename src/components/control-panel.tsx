@@ -185,6 +185,18 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.aiBuildings ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.trees ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Trees</dt>
+                      <dd className="text-right">{(stats.trees ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
+                  {(stats.waterBodies ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Water bodies</dt>
+                      <dd className="text-right">{(stats.waterBodies ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   <dt className="text-muted">Vertices</dt>
                   <dd className="text-right">{stats.vertices.toLocaleString()}</dd>
                 </dl>
@@ -198,6 +210,16 @@ export function ControlPanel({ exportFn }: Props) {
                     label="Terrain"
                     checked={layers.terrain}
                     onCheckedChange={(on) => setLayers({ terrain: on })}
+                  />
+                  <RowSwitch
+                    label="Water"
+                    checked={layers.water}
+                    onCheckedChange={(on) => setLayers({ water: on })}
+                  />
+                  <RowSwitch
+                    label="Vegetation"
+                    checked={layers.vegetation}
+                    onCheckedChange={(on) => setLayers({ vegetation: on })}
                   />
                 </div>
                 <RowSwitch
