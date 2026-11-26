@@ -11,6 +11,7 @@ import { fetchCityTiled } from "@/lib/city/tiles";
 import { enrichBuildingsWithAI } from "@/lib/city/ai-enrich";
 import { fetchLandLayersFn } from "@/lib/city/fetch-overture";
 import { attachLandData } from "@/lib/city/land-data";
+import { enrichFacadeColorsFromStreet } from "@/lib/city/street-enrich";
 import { toast } from "sonner";
 
 type Layers = {
@@ -37,6 +38,9 @@ type StudioState = {
   /** Modelo propio (ONNX): altura, techo y material de edificios desde la imagen aérea. */
   aiBuildings: boolean;
   setAiBuildings: (on: boolean) => void;
+  /** Color real de fachadas desde fotos de calle (Mapillary). */
+  streetColors: boolean;
+  setStreetColors: (on: boolean) => void;
   /** Modo realista: satélite HD y cielo. */
   realistic: RealisticOptions;
   setRealistic: (partial: Partial<RealisticOptions>) => void;
@@ -88,6 +92,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   satellite: true,
   aiBuildings: true,
   setAiBuildings: (on) => set({ aiBuildings: on }),
+  streetColors: true,
+  setStreetColors: (on) => set({ streetColors: on }),
   realistic: REALISTIC_ON,
   setRealistic: (partial) => set((s) => ({ realistic: { ...s.realistic, ...partial } })),
   setRealisticMode: (on) =>
@@ -255,6 +261,21 @@ export const useStudio = create<StudioState>((set, get) => ({
         attachLandData(data, land);
       } catch (e) {
         console.warn("[generate] agua/árboles no disponibles", e);
+      }
+      if (get().streetColors) {
+        try {
+          set({ progress: 40, progressLabel: "Fotos de calle: buscando fachadas…" });
+          const res = await enrichFacadeColorsFromStreet(data, (done, total) =>
+            set({ progress: 40, progressLabel: `Fotos de calle: ${done}/${total}…` }),
+          );
+          if (res.notConfigured) {
+            toast.warning("Fotos de calle no configuradas: define MAPILLARY_TOKEN en el servidor. Se usan los colores estándar.");
+          } else if (res.warning && res.applied === 0) {
+            toast.warning(`Fotos de calle: ${res.warning}`);
+          }
+        } catch (e) {
+          console.warn("[generate] fotos de calle fallaron", e);
+        }
       }
       if (get().aiBuildings) {
         try {

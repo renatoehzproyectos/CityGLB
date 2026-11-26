@@ -22,6 +22,8 @@ export type BuildingFeature = {
   material?: import("./ai-schema").FacadeMaterial;
   /** Algún campo de este edificio fue estimado por IA a partir de la imagen aérea. */
   ai?: boolean;
+  /** El color de fachada viene de una foto de calle (Mapillary). */
+  street?: boolean;
 };
 
 /** Cuerpo de agua real (Overture base/water), en metros locales. rings[0] = exterior, el resto islas. */
@@ -49,6 +51,7 @@ export type CityStats = {
   aiBuildings?: number;
   trees?: number;
   waterBodies?: number;
+  streetBuildings?: number;
 };
 
 export type PlaceHit = {

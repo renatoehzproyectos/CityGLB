@@ -27,6 +27,8 @@ export function ControlPanel({ exportFn }: Props) {
   const stats = useStudio((s) => s.stats);
   const layers = useStudio((s) => s.layers);
   const satellite = useStudio((s) => s.satellite);
+  const streetColors = useStudio((s) => s.streetColors);
+  const setStreetColors = useStudio((s) => s.setStreetColors);
   const aiBuildings = useStudio((s) => s.aiBuildings);
   const setAiBuildings = useStudio((s) => s.setAiBuildings);
   const realistic = useStudio((s) => s.realistic);
@@ -185,6 +187,12 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.aiBuildings ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.streetBuildings ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Street-photo colors</dt>
+                      <dd className="text-right">{(stats.streetBuildings ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   {(stats.trees ?? 0) > 0 && (
                     <>
                       <dt className="text-muted">Trees</dt>
@@ -229,6 +237,15 @@ export function ControlPanel({ exportFn }: Props) {
                 />
                 <p className="text-[10px] leading-snug text-subtle">
                   Esri World Imagery · no API key · remeshes the scene
+                </p>
+                <RowSwitch
+                  label="Color real de fachadas (fotos de calle)"
+                  checked={streetColors}
+                  onCheckedChange={setStreetColors}
+                />
+                <p className="text-[10px] leading-snug text-subtle">
+                  Toma el color de cada fachada de la foto de calle más cercana. Requiere MAPILLARY_TOKEN en el
+                  servidor. Imágenes: Mapillary, CC BY-SA.
                 </p>
                 <RowSwitch
                   label="IA propia de edificios (altura, techo, material)"
