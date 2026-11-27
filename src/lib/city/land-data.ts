@@ -1,4 +1,5 @@
 import { project, ringArea } from "./geo";
+import { roadWidth } from "./roads";
 import type { LandResponse } from "./fetch-overture";
 import type { CityData } from "./types";
 
@@ -13,4 +14,13 @@ export function attachLandData(data: CityData, land: LandResponse): void {
   data.cover = (land.cover ?? [])
     .map((c) => ({ subtype: c.s, ring: (c.r[0] ?? []).map(proj) }))
     .filter((c) => c.ring.length >= 3 && ringArea(c.ring) >= 40);
+  data.roads = (land.roads ?? [])
+    .map((r) => ({
+      cls: r.c,
+      width: roadWidth(r.c),
+      bridge: !!r.b,
+      tunnel: !!r.t,
+      pts: r.l.map(proj),
+    }))
+    .filter((r) => r.pts.length >= 2 && !r.tunnel);
 }

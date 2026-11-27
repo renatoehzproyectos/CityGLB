@@ -211,6 +211,12 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.treeModels ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.bridges ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Bridges</dt>
+                      <dd className="text-right">{(stats.bridges ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   {(stats.grassPatches ?? 0) > 0 && (
                     <>
                       <dt className="text-muted">Grass patches</dt>

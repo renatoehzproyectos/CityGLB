@@ -6,13 +6,13 @@
  *    normalizado para teñirlas con el color REAL de la imagen satelital (color por instancia).
  *  · InstancedMesh: miles de árboles/parches con pocas llamadas de dibujo.
  *  · Viento: balanceo en el vertex shader (la animación "MorphBake" original no es viable a esta escala).
- *  · Si los modelos no cargan, se usa la malla simple anterior (buildTreesMesh).
- *  · Los árboles que exceden el cupo de la GPU (cupo menor en móvil) usan la malla simple.
+ *  · Ya no hay árboles de juguete: si no cargan los modelos, no se dibujan árboles.
+ *  · Si hay más árboles que el cupo de la GPU, se aclaran de forma uniforme.
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { buildTreesMesh, type GrassPatch, type Tree } from "./vegetation";
+import type { GrassPatch, Tree } from "./vegetation";
 
 type Part = { kind: string; geometry: THREE.BufferGeometry; material: THREE.MeshStandardMaterial };
 type TreeSet = { parts: Part[]; width: number }[]; // altura normalizada = 1
@@ -249,34 +249,35 @@ export async function buildVegetation(
 
   // ---------------- ÁRBOLES ----------------
   // Tres niveles, de más a menos detalle, según cercanía al centro de la escena (donde suele estar la cámara):
-  //   1) modelo completo  2) modelo ligero  3) malla simple de respaldo (sin cupo)
+  //   1) modelo completo  2) modelo ligero
   if (trees.length) {
     const group = new THREE.Group();
     group.name = "trees";
+    // SIN árboles de juguete: todos usan el modelo 3D. Cerca del centro de la escena, el modelo completo;
+    // el resto, el modelo ligero (instanciado, barato). Si hay más árboles que cupo, se aclara de forma
+    // uniforme (nunca se cae a la malla simple). Sin ningún modelo cargado no se dibuja ningún árbol.
     const sorted = trees
       .slice()
       .sort((a, b) => (a.x - center.x) ** 2 + (a.z - center.z) ** 2 - ((b.x - center.x) ** 2 + (b.z - center.z) ** 2));
     const cap0 = assets.lod0 ? (mobile ? 500 : 2500) : 0;
-    const cap1 = assets.lod1 ? (mobile ? 3500 : 9000) : 0;
     const t0 = sorted.slice(0, cap0);
-    const t1 = sorted.slice(cap0, cap0 + cap1);
-    // si falta el modelo completo, el ligero ocupa también ese cupo
-    const lightList = assets.lod0 ? t1 : sorted.slice(0, cap1 + (mobile ? 500 : 2500));
-    const rest = sorted.slice(assets.lod0 ? cap0 + cap1 : lightList.length);
+    let lightList = sorted.slice(cap0);
+    const capLight = mobile ? 9000 : 14000;
+    if (lightList.length > capLight) {
+      const step = lightList.length / capLight;
+      lightList = Array.from({ length: capLight }, (_, i) => lightList[Math.floor(i * step)]);
+    }
+    const lightSet = assets.lod1 ?? assets.lod0; // si falta el ligero, el completo hace de ligero
 
     if (assets.lod0 && t0.length) {
       res.vertices += addTreeTier(group, assets.lod0, t0, groundAt, wind, "hi", true);
       res.treeModels += t0.length;
     }
-    if (assets.lod1 && lightList.length) {
-      res.vertices += addTreeTier(group, assets.lod1, lightList, groundAt, wind, "lo", true);
+    if (lightSet && lightList.length) {
+      res.vertices += addTreeTier(group, lightSet, lightList, groundAt, wind, "lo", true);
       res.treeModels += lightList.length;
     }
-    const legacy = buildTreesMesh(rest, groundAt);
-    if (legacy) {
-      group.add(legacy);
-      res.vertices += legacy.geometry.getAttribute("position").count;
-    }
+    if (!assets.lod0 && !assets.lod1) console.error("[vegetation] sin modelos de árbol: no se dibujan árboles");
     if (group.children.length) res.trees = group;
   }
 

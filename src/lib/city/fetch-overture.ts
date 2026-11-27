@@ -482,6 +482,8 @@ export type LandResponse = {
   trees: [number, number][];
   /** Cobertura del suelo (Overture base/land_cover, derivada de ESA WorldCover a 10 m): forest, grass, shrub, crop… */
   cover: { s: string; r: [number, number][][] }[];
+  /** Vías (Overture transportation/segment). c=clase, b=puente, t=túnel, l=polilínea lon/lat */
+  roads: { c: string; b: boolean; t: boolean; l: [number, number][] }[];
 };
 
 const LAND_MAX_VERTS = 40000;
@@ -499,7 +501,7 @@ async function queryLandLayers(bbox: BBox): Promise<LandResponse> {
   if (hit && hit.expiresAt > Date.now()) return hit.data;
 
   const box = { minX: bbox.minLon, maxX: bbox.maxLon, minZ: bbox.minLat, maxZ: bbox.maxLat };
-  const out: LandResponse = { water: [], trees: [], cover: [] };
+  const out: LandResponse = { water: [], trees: [], cover: [], roads: [] };
 
   // --- agua ---
   try {
@@ -585,6 +587,78 @@ async function queryLandLayers(bbox: BBox): Promise<LandResponse> {
     }
   } catch (e) {
     console.warn("[overture] base/land_cover no disponible (se usa solo la imagen satelital)", e instanceof Error ? e.message : e);
+  }
+
+  // --- vías y vías férreas + puentes/túneles (con su tramo exacto) ---
+  try {
+    const cols = ["id", "subtype", "class", "road_flags", "geometry"];
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await runOvertureQuery("transportation", "segment", release, cols, bbox, 40000);
+    } catch {
+      // releases sin road_flags: reintenta sin la columna (no se sabrá qué es puente; se infiere por el agua)
+      rows = await runOvertureQuery("transportation", "segment", release, ["id", "subtype", "class", "geometry"], bbox, 40000);
+    }
+    type Rng = [number, number];
+    const rangesOf = (v: unknown, flag: string): Rng[] => {
+      const out: Rng[] = [];
+      if (!Array.isArray(v)) return out;
+      for (const f of v) {
+        const vals = (f as { values?: unknown })?.values;
+        if (!Array.isArray(vals) || !vals.map(String).includes(flag)) continue;
+        const bt = (f as { between?: unknown })?.between;
+        out.push(Array.isArray(bt) && bt.length === 2 ? [Number(bt[0]), Number(bt[1])] : [0, 1]);
+      }
+      return out;
+    };
+    const cosLat = Math.cos((((bbox.minLat + bbox.maxLat) / 2) * Math.PI) / 180);
+    const slice = (line: [number, number][], t0: number, t1: number): [number, number][] => {
+      const L: number[] = [0];
+      for (let i = 1; i < line.length; i++) L.push(L[i - 1] + Math.hypot((line[i][0] - line[i - 1][0]) * cosLat, line[i][1] - line[i - 1][1]));
+      const tot = L[L.length - 1] || 1;
+      const at = (d: number): [number, number] => {
+        let k = 1;
+        while (k < L.length - 1 && L[k] < d) k++;
+        const seg = L[k] - L[k - 1] || 1, t = Math.min(1, Math.max(0, (d - L[k - 1]) / seg));
+        return [line[k - 1][0] + (line[k][0] - line[k - 1][0]) * t, line[k - 1][1] + (line[k][1] - line[k - 1][1]) * t];
+      };
+      const a = t0 * tot, b = t1 * tot;
+      const pts: [number, number][] = [at(a)];
+      for (let i = 0; i < line.length; i++) if (L[i] > a + 1e-9 && L[i] < b - 1e-9) pts.push(line[i]);
+      pts.push(at(b));
+      return pts;
+    };
+    for (const row of rows) {
+      const sub = String(row.subtype ?? "");
+      if (sub !== "road" && sub !== "rail") continue;
+      const g = asGeoJsonGeometry(row.geometry);
+      if (!g || (g.type !== "LineString" && g.type !== "MultiLineString")) continue;
+      const lines = (g.type === "LineString" ? [g.coordinates] : g.coordinates) as [number, number][][];
+      const cls = sub === "rail" ? "rail" : String(row.class ?? "unknown");
+      const br = rangesOf(row.road_flags, "is_bridge"), tn = rangesOf(row.road_flags, "is_tunnel");
+      for (const line of lines) {
+        if (line.length < 2) continue;
+        if (!line.some(([x, y]) => x >= box.minX && x <= box.maxX && y >= box.minZ && y <= box.maxZ)) continue;
+        const cuts = new Set<number>([0, 1]);
+        if (lines.length === 1) for (const [a, b] of [...br, ...tn]) { cuts.add(Math.min(1, Math.max(0, a))); cuts.add(Math.min(1, Math.max(0, b))); }
+        const ts = [...cuts].sort((x, y) => x - y);
+        for (let i = 0; i < ts.length - 1; i++) {
+          if (ts[i + 1] - ts[i] < 1e-6) continue;
+          const mid = (ts[i] + ts[i + 1]) / 2;
+          const inR = (rs: Rng[]) => rs.some(([a, b]) => mid >= a && mid <= b);
+          const piece = ts.length === 2 ? line : slice(line, ts[i], ts[i + 1]);
+          if (piece.length < 2) continue;
+          out.roads.push({
+            c: cls,
+            b: inR(br),
+            t: inR(tn),
+            l: piece.map(([x, y]) => [round5(x), round5(y)] as [number, number]),
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[overture] transportation/segment no disponible", e instanceof Error ? e.message : e);
   }
 
   if (landCache.size >= 8) landCache.delete(landCache.keys().next().value as string);

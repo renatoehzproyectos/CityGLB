@@ -11,6 +11,7 @@ import * as THREE from "three";
 import type { LocalBox } from "./geo";
 import type { RoofSampler } from "./roofs";
 import type { CityData } from "./types";
+import { buildRoadIndex, pushOffRoads } from "./roads";
 
 export type Tree = {
   x: number; z: number;
@@ -99,38 +100,77 @@ export function detectCanopy(
   const cell = Math.max(baseCell, Math.ceil(Math.sqrt(N / maxTrees)));
   const sR = Math.max(1, Math.round(1.5 / mPerPx)); // suavizado del score
   const dR = Math.max(4, Math.round(12 / mPerPx)); // ventana de densidad
-  const out: { px: number; py: number; r: number; color: [number, number, number]; lum: number; dens: number }[] = [];
+  type Cand = { px: number; py: number; score: number };
+  const cands: Cand[] = [];
 
-  for (let cy = 0; cy < h; cy += cell) {
-    for (let cx = 0; cx < w; cx += cell) {
-      const x1 = Math.min(w, cx + cell), y1 = Math.min(h, cy + cell);
-      const cnt = box(iM, cx, cy, x1, y1);
-      if (cnt < 0.35 * (x1 - cx) * (y1 - cy)) continue; // la celda no es mayormente copa
-      let best = -1, bx = 0, by = 0;
-      for (let y = cy; y < y1; y++) {
-        for (let x = cx; x < x1; x++) {
+  // 1) Candidatos: celdas MÁS PEQUEÑAS que el espaciado final y desfasadas por fila (sin rejilla alineada).
+  //    El score lleva ruido para que, en copas uniformes, el ganador no sea siempre el mismo píxel de la celda
+  //    (antes: primer píxel de cada celda ⇒ hileras perfectamente rectas).
+  const cs = Math.max(2, Math.round(cell * 0.7));
+  const winArea = (2 * sR + 1) * (2 * sR + 1);
+  for (let row = 0, cy = 0; cy < h; cy += cs, row++) {
+    const shift = Math.floor(hashN(row * 3.7, 11.1) * cs); // desfase horizontal propio de cada fila
+    for (let cx = -shift; cx < w; cx += cs) {
+      const x0 = Math.max(0, cx), y0 = cy, x1 = Math.min(w, cx + cs), y1 = Math.min(h, cy + cs);
+      if (x1 <= x0 || y1 <= y0) continue;
+      const cnt = box(iM, x0, y0, x1, y1);
+      if (cnt < 0.35 * (x1 - x0) * (y1 - y0)) continue;
+      let best = -Infinity, bx = 0, by = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
           if (!mask[y * w + x]) continue;
-          const sc = box(iD, x - sR, y - sR, x + sR + 1, y + sR + 1);
+          const sc = box(iD, x - sR, y - sR, x + sR + 1, y + sR + 1) + (hashN(x * 0.731, y * 1.377) - 0.5) * winArea * 0.35;
           if (sc > best) { best = sc; bx = x; by = y; }
         }
       }
-      if (best < 0) continue;
-      let r = 0, g = 0, b = 0, k = 0;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        const xx = Math.min(w - 1, Math.max(0, bx + dx)), yy = Math.min(h - 1, Math.max(0, by + dy));
-        const i = (yy * w + xx) * 4;
-        r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; k++;
-      }
-      const wA = (Math.min(w, bx + dR + 1) - Math.max(0, bx - dR)) * (Math.min(h, by + dR + 1) - Math.max(0, by - dR));
-      const dens = wA > 0 ? box(iM, bx - dR, by - dR, bx + dR + 1, by + dR + 1) / wA : 0;
-      out.push({
-        px: bx, py: by,
-        r: Math.min(6.5, Math.max(1.5, cell * mPerPx * 0.62)),
-        color: [r / (k * 255), g / (k * 255), b / (k * 255)],
-        lum: (r + g + b) / (k * 765),
-        dens,
-      });
+      if (best === -Infinity) continue;
+      cands.push({ px: bx, py: by, score: best });
     }
+  }
+
+  // 2) Selección tipo "disco de Poisson": de mejor a peor score, un candidato se acepta si no hay otro árbol
+  //    aceptado más cerca que una distancia mínima VARIABLE (0.75–1.25 × cell). Resultado: espaciado orgánico.
+  cands.sort((a, b) => b.score - a.score);
+  const gs = Math.max(2, Math.floor(cell * 1.3));
+  const gw = Math.ceil(w / gs) + 1;
+  const spatial = new Map<number, number[]>(); // celda → índices en `out`
+  const out: { px: number; py: number; r: number; color: [number, number, number]; lum: number; dens: number }[] = [];
+  for (const c of cands) {
+    const minD = cell * (0.75 + 0.5 * hashN(c.px * 0.37, c.py * 0.91));
+    const gx = Math.floor(c.px / gs), gy = Math.floor(c.py / gs);
+    let ok = true;
+    for (let j = gy - 1; j <= gy + 1 && ok; j++) for (let i = gx - 1; i <= gx + 1 && ok; i++) {
+      const lst = spatial.get(j * gw + i);
+      if (!lst) continue;
+      for (const k of lst) if (Math.hypot(out[k].px - c.px, out[k].py - c.py) < minD) { ok = false; break; }
+    }
+    if (!ok) continue;
+    let bx = c.px, by = c.py;
+    // pequeño desplazamiento aleatorio (solo si sigue siendo copa)
+    const ang = hashN(c.px * 1.9, c.py * 0.7) * Math.PI * 2, rad = cell * 0.22 * hashN(c.py * 2.3, c.px * 0.3);
+    const jx = Math.round(bx + Math.cos(ang) * rad), jy = Math.round(by + Math.sin(ang) * rad);
+    if (jx >= 0 && jy >= 0 && jx < w && jy < h && mask[jy * w + jx]) { bx = jx; by = jy; }
+
+    let r = 0, g = 0, b = 0, k = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const xx = Math.min(w - 1, Math.max(0, bx + dx)), yy = Math.min(h - 1, Math.max(0, by + dy));
+      const i = (yy * w + xx) * 4;
+      r += rgba[i]; g += rgba[i + 1]; b += rgba[i + 2]; k++;
+    }
+    const wA = (Math.min(w, bx + dR + 1) - Math.max(0, bx - dR)) * (Math.min(h, by + dR + 1) - Math.max(0, by - dR));
+    const dens = wA > 0 ? box(iM, bx - dR, by - dR, bx + dR + 1, by + dR + 1) / wA : 0;
+    const size = 0.8 + 0.45 * hashN(bx * 0.53, by * 0.29); // copas de tamaños distintos
+    const idx = out.length;
+    out.push({
+      px: bx, py: by,
+      r: Math.min(6.5, Math.max(1.5, cell * mPerPx * 0.62 * size)),
+      color: [r / (k * 255), g / (k * 255), b / (k * 255)],
+      lum: (r + g + b) / (k * 765),
+      dens,
+    });
+    const kk = gy * gw + gx;
+    const l = spatial.get(kk);
+    if (l) l.push(idx); else spatial.set(kk, [idx]);
   }
   return out;
 }
@@ -225,6 +265,23 @@ export function analyzeVegetation(
       if (hash.has(key(x + dx * 4, z + dz * 4))) { near = true; break; }
     }
     if (!near) trees.push({ x, z, r: f.r, color: f.color, lum: f.lum, dens: f.dens });
+  }
+  // Ningún árbol sobre una vía: se mueve exactamente al borde (semiancho + holgura + algo de copa), nunca encima.
+  if (data.roads?.length) {
+    const idx = buildRoadIndex(data.roads);
+    const moved: Tree[] = [];
+    for (const t of trees) {
+      const margin = 0.6 + Math.min(t.r, 3) * 0.45 + hashN(t.x * 0.9, t.z * 1.1) * 1.2; // holgura variable: no forma una línea recta
+      const [nx, nz] = pushOffRoads(idx, t.x, t.z, margin);
+      if (nx !== t.x || nz !== t.z) {
+        // si al moverlo cae dentro de un edificio/agua o fuera del mapa, se descarta en vez de ponerlo mal
+        const ix = Math.floor(px(nx)), iz = Math.floor(pz(nz));
+        if (ix < 0 || iz < 0 || ix >= w || iz >= h || exclude[iz * w + ix]) continue;
+        moved.push({ ...t, x: nx, z: nz });
+      } else moved.push(t);
+    }
+    trees.length = 0;
+    trees.push(...moved);
   }
   const grass = maxGrass > 0
     ? detectGrass(rgba, w, h, mPerPx, exclude, cover, maxGrass).map((g) => ({ ...g, x: g.x + ext.minX, z: g.z + ext.minZ }))

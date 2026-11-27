@@ -10,6 +10,8 @@ import { getCityAssets } from "./prefetch";
 import { MATERIAL_TINT, createFacadeMaterial } from "./facade-materials";
 import { buildWaterMesh } from "./water";
 import { analyzeVegetation } from "./vegetation";
+import { flattenTerrain } from "./flatten";
+import { buildBridges, collectBridges } from "./bridges";
 import { buildVegetation } from "./vegetation-gl";
 import type { SeaMaterial, WaterConfig } from "./water-material";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
@@ -602,11 +604,15 @@ export type CityMeshes = {
   trees?: THREE.Object3D;
   /** Césped instanciado en zonas verdes sin árboles. */
   grass?: THREE.Object3D;
+  /** Puentes (tablero, parapetos, pilas). */
+  bridges?: THREE.Object3D;
+  /** Altura del tablero de un puente en (x,z), o null si no hay puente ahí. */
+  deckAt?: (x: number, z: number) => number | null;
   /** Avanza animaciones (olas, viento). Llamar cada fotograma con el tiempo en segundos. */
   update?: (timeSec: number) => void;
   /** Pasa al agua el sol y el cielo de la escena para sus reflejos. */
   configureWater?: (c: WaterConfig) => void;
-  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; treeModels: number; grassPatches: number; waterBodies: number; streetBuildings: number; streetMaterials: number };
+  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; treeModels: number; grassPatches: number; waterBodies: number; bridges: number; streetBuildings: number; streetMaterials: number };
   heightGrid?: HeightGrid | null;
 };
 
@@ -647,7 +653,18 @@ export async function buildCityMeshes(
   const satPromise = assets.sat;
   onProgress?.(0.1, "Loading terrain data…");
 
-  const grid = await elevPromise;
+  const rawGrid = await elevPromise;
+  let grid = rawGrid;
+  if (rawGrid && cfg.FLATTEN_URBAN) {
+    try {
+      onProgress?.(0.3, "Flattening urban terrain…");
+      const f = flattenTerrain(rawGrid, data);
+      grid = f.grid;
+      console.info("[flatten]", f.stats);
+    } catch (e) {
+      console.warn("Flatten failed; using raw terrain", e);
+    }
+  }
   let satCanvas: HTMLCanvasElement | null = null;
   onProgress?.(0.55, "Building terrain…");
 
@@ -769,6 +786,24 @@ export async function buildCityMeshes(
       console.warn("Water failed", e);
     }
   }
+  let bridgesObj: THREE.Object3D | undefined;
+  let deckAt: ((x: number, z: number) => number | null) | undefined;
+  let bridgeCount = 0;
+  if (data.roads?.length) {
+    try {
+      onProgress?.(0.92, "Building bridges…");
+      const b = buildBridges(collectBridges(data), groundAt);
+      if (b) {
+        bridgesObj = b.group;
+        deckAt = b.deckAt;
+        bridgeCount = b.count;
+        group.add(b.group);
+        vertices += (b.group.children[0] as THREE.Mesh).geometry.getAttribute("position").count;
+      }
+    } catch (e) {
+      console.warn("Bridges failed", e);
+    }
+  }
   let treesObj: THREE.Object3D | undefined;
   let grassObj: THREE.Object3D | undefined;
   let treeCount = 0;
@@ -813,6 +848,8 @@ export async function buildCityMeshes(
     water: waterMesh,
     trees: treesObj,
     grass: grassObj,
+    bridges: bridgesObj,
+    deckAt,
     update: (t) => {
       if (waterMesh) (waterMesh.material as SeaMaterial).tick?.(t);
       vegTick?.(t);
@@ -828,6 +865,7 @@ export async function buildCityMeshes(
       treeModels,
       grassPatches,
       waterBodies,
+      bridges: bridgeCount,
       streetBuildings: data.buildings.reduce((n, b) => n + (b.street ? 1 : 0), 0),
       streetMaterials: data.buildings.reduce((n, b) => n + (b.streetMaterial ? 1 : 0), 0),
     },

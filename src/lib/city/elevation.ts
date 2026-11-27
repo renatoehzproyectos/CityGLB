@@ -420,10 +420,14 @@ export function sampleHeight(grid: HeightGrid, x: number, z: number): number {
   if (width < 2 || height < 2) return data[0] ?? 0;
 
   // Find i,j
-  let i = 0;
-  while (i < width - 1 && xs[i + 1] < x) i++;
-  let j = 0;
-  while (j < height - 1 && zs[j + 1] < z) j++;
+  // búsqueda binaria (la malla puede ser densa tras el aplanado)
+  const lb = (a: Float32Array, v: number, len: number) => {
+    let lo = 0, hi = len - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid + 1] < v) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+  const i = lb(xs, x, width);
+  const j = lb(zs, z, height);
 
   const i1 = Math.min(i + 1, width - 1);
   const j1 = Math.min(j + 1, height - 1);

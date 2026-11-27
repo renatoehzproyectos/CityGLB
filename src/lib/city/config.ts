@@ -5,6 +5,7 @@ export const cfg = {
   LEVEL_HEIGHT: 3.2,
 
   FLAT_TERRAIN: false, // now uses real elevation
+  FLATTEN_URBAN: true, // fase 2: aplana calles, manzanas y bases de edificios sobre el DEM
   MAX_BUILDINGS: 80000,
   SIMPLIFY_TOLERANCE: 0.6,
   MIN_BUILDING_AREA: 15,

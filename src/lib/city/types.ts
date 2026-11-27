@@ -34,6 +34,17 @@ export type WaterFeature = {
   rings: Ring[];
 };
 
+/** Vía real (Overture transportation/segment), polilínea en metros locales. */
+export type RoadFeature = {
+  /** clase Overture: motorway, primary, residential, footway, … */
+  cls: string;
+  /** ancho total estimado de la calzada en m */
+  width: number;
+  bridge: boolean;
+  tunnel: boolean;
+  pts: Ring;
+};
+
 export type CityData = {
   origin: { lon: number; lat: number };
   bbox: BBox;
@@ -44,6 +55,8 @@ export type CityData = {
   water?: WaterFeature[];
   /** Árboles individuales reales (OSM vía Overture), en metros locales. */
   osmTrees?: [number, number][];
+  /** Vías reales (fase 1: evitar árboles sobre ellas; fases siguientes: aplanado y puentes). */
+  roads?: RoadFeature[];
   /** Cobertura del suelo (bosque, pasto, matorral, cultivo…), en metros locales. */
   cover?: { subtype: string; ring: Ring }[];
 };
@@ -58,6 +71,7 @@ export type CityStats = {
   treeModels?: number;
   grassPatches?: number;
   waterBodies?: number;
+  bridges?: number;
   streetBuildings?: number;
   streetMaterials?: number;
 };
