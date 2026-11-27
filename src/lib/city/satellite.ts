@@ -26,7 +26,7 @@ export function satelliteMaxPx(): number {
     const gl = document.createElement("canvas").getContext("webgl2") as WebGL2RenderingContext | null;
     const maxTex = gl ? (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) : 4096;
     const mobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
-    return Math.max(2048, Math.min(mobile ? 4096 : 8192, maxTex));
+    return Math.max(2048, Math.min(mobile ? 8192 : 16384, maxTex, 16384));
   } catch {
     return 4096;
   }

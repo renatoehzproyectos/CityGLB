@@ -23,7 +23,9 @@ function widthMeters(b: BBox): number {
  * Se lanzan al pulsar "Generate", EN PARALELO con la consulta a Overture, en vez de
  * esperar a tener los edificios. La entrada queda en caché para reconstruir sin re-descargar.
  */
-export function getCityAssets(bbox: BBox, o: AssetOpts): CityAssets {
+export function getCityAssets(bbox: BBox, opts: AssetOpts): CityAssets {
+  // El satélite SIEMPRE se pide en la máxima calidad, sin importar el modo realista.
+  const o: AssetOpts = { ...opts, hdSatellite: true };
   const k = key(bbox, o);
   const hit = store.get(k);
   if (hit) return hit;
@@ -43,7 +45,7 @@ export function getCityAssets(bbox: BBox, o: AssetOpts): CityAssets {
 
   const sat =
     o.satellite
-      ? buildSatelliteCanvas(bbox, o.hdSatellite ? { maxPx: satelliteMaxPx(), zoomCap: 19 } : { maxPx: 2048, zoomCap: 18 }).catch((e) => {
+      ? buildSatelliteCanvas(bbox, { maxPx: satelliteMaxPx(), zoomCap: 20 }).catch((e) => {
           console.warn("Satellite texture failed", e);
           return null;
         })

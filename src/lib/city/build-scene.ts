@@ -9,7 +9,9 @@ import { buildSatelliteCanvas } from "./satellite";
 import { getCityAssets } from "./prefetch";
 import { MATERIAL_TINT, createFacadeMaterial } from "./facade-materials";
 import { buildWaterMesh } from "./water";
-import { buildTreesMesh, detectTrees } from "./vegetation";
+import { analyzeVegetation } from "./vegetation";
+import { buildVegetation } from "./vegetation-gl";
+import type { SeaMaterial, WaterConfig } from "./water-material";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
 import type { RGB, RoofShape } from "./roof-data";
 
@@ -596,7 +598,14 @@ export type CityMeshes = {
   roofs?: THREE.Mesh;
   terrain: THREE.Mesh;
   water?: THREE.Mesh;
-  trees?: THREE.Mesh;
+  /** Árboles (modelo 3D instanciado + malla simple de respaldo). */
+  trees?: THREE.Object3D;
+  /** Césped instanciado en zonas verdes sin árboles. */
+  grass?: THREE.Object3D;
+  /** Avanza animaciones (olas, viento). Llamar cada fotograma con el tiempo en segundos. */
+  update?: (timeSec: number) => void;
+  /** Pasa al agua el sol y el cielo de la escena para sus reflejos. */
+  configureWater?: (c: WaterConfig) => void;
   stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; waterBodies: number; streetBuildings: number; streetMaterials: number };
   heightGrid?: HeightGrid | null;
 };
@@ -760,19 +769,28 @@ export async function buildCityMeshes(
       console.warn("Water failed", e);
     }
   }
-  let treesMesh: THREE.Mesh | undefined;
+  let treesObj: THREE.Object3D | undefined;
+  let grassObj: THREE.Object3D | undefined;
   let treeCount = 0;
+  let vegTick: ((t: number) => void) | undefined;
   if (satCanvas || data.osmTrees?.length) {
     try {
       onProgress?.(0.94, "Placing vegetation…");
-      const trees = satCanvas ? detectTrees(satCanvas, data, roofSampler) : [];
-      const m = buildTreesMesh(trees, groundAt);
-      if (m) {
-        treesMesh = m;
-        treeCount = trees.length;
-        group.add(m);
-        vertices += m.geometry.getAttribute("position").count;
+      const veg = satCanvas
+        ? analyzeVegetation(satCanvas, data, roofSampler)
+        : { trees: [], grass: [], coverUsed: false };
+      const built = await buildVegetation(veg.trees, veg.grass, groundAt);
+      vegTick = built.tick;
+      if (built.trees) {
+        treesObj = built.trees;
+        treeCount = veg.trees.length;
+        group.add(built.trees);
       }
+      if (built.grass) {
+        grassObj = built.grass;
+        group.add(built.grass);
+      }
+      vertices += built.vertices;
     } catch (e) {
       console.warn("Vegetation failed", e);
     }
@@ -786,7 +804,15 @@ export async function buildCityMeshes(
     roofs: roofsMesh,
     terrain: terrainMesh,
     water: waterMesh,
-    trees: treesMesh,
+    trees: treesObj,
+    grass: grassObj,
+    update: (t) => {
+      if (waterMesh) (waterMesh.material as SeaMaterial).tick?.(t);
+      vegTick?.(t);
+    },
+    configureWater: (c) => {
+      if (waterMesh) (waterMesh.material as SeaMaterial).configure?.(c);
+    },
     stats: {
       buildings: data.buildings.length,
       vertices,

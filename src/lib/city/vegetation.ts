@@ -26,6 +26,27 @@ export type Tree = {
 export const MAX_TREES = 14000;
 const EXG_T = 0.1;
 
+/** Clases de cobertura del suelo (raster alineado con la imagen satelital). */
+export const COVER = { NONE: 0, FOREST: 1, GRASS: 2, SHRUB: 3, CROP: 4, WETLAND: 5, SEALED: 6 } as const;
+export function coverCode(subtype: string): number {
+  switch (subtype) {
+    case "forest": case "mangrove": return COVER.FOREST;
+    case "grass": case "moss": return COVER.GRASS;
+    case "shrub": return COVER.SHRUB;
+    case "crop": return COVER.CROP;
+    case "wetland": return COVER.WETLAND;
+    case "urban": case "barren": case "snow": return COVER.SEALED;
+    default: return COVER.NONE;
+  }
+}
+
+/** ¿Este píxel parece copa de árbol? Los umbrales se ajustan con la cobertura del suelo. */
+function isCanopyPx(exg: number, lum: number, cov: number): boolean {
+  if (cov === COVER.FOREST) return exg > 0.03 && lum > 0.04 && lum < 0.55; // bosque: incluye copas secas/soleadas
+  if (cov === COVER.GRASS || cov === COVER.CROP) return exg > 0.12 && lum > 0.06 && lum < 0.26; // césped/cultivo: solo copas bien oscuras
+  return exg > EXG_T && lum > 0.06 && lum < 0.36;
+}
+
 /** Detección pura sobre RGBA (testeable sin navegador). Devuelve píxeles y metros. */
 export function detectCanopy(
   rgba: Uint8ClampedArray | Uint8Array,
@@ -34,6 +55,7 @@ export function detectCanopy(
   mPerPx: number,
   exclude: Uint8Array | null,
   maxTrees = MAX_TREES,
+  cover: Uint8Array | null = null,
 ): { px: number; py: number; r: number; color: [number, number, number]; lum: number; dens: number }[] {
   const n = w * h;
   const mask = new Uint8Array(n);
@@ -46,7 +68,7 @@ export function detectCanopy(
     if (s < 45) continue;
     const exg = (2 * g - r - b) / s;
     const lum = s / 765;
-    if (exg > EXG_T && lum > 0.06 && lum < 0.36) {
+    if (isCanopyPx(exg, lum, cover ? cover[i] : 0)) {
       mask[i] = 1;
       dark[i] = 0.4 - lum + exg;
       N++;
@@ -115,6 +137,16 @@ export function detectCanopy(
 
 /** Envoltorio de navegador: imagen satelital + exclusión de edificios/agua + árboles de los datos. */
 export function detectTrees(sat: HTMLCanvasElement, data: CityData, sampler: RoofSampler | null): Tree[] {
+  return analyzeVegetation(sat, data, sampler, 0).trees;
+}
+
+/** Árboles + césped en una pasada (comparten máscara de exclusión y cobertura del suelo). */
+export function analyzeVegetation(
+  sat: HTMLCanvasElement,
+  data: CityData,
+  sampler: RoofSampler | null,
+  maxGrass = 9000,
+): { trees: Tree[]; grass: GrassPatch[]; coverUsed: boolean } {
   const ext = data.extent;
   const W = ext.maxX - ext.minX, D = ext.maxZ - ext.minZ;
   const scale = Math.min(1, 2048 / Math.max(sat.width, sat.height));
@@ -126,7 +158,7 @@ export function detectTrees(sat: HTMLCanvasElement, data: CityData, sampler: Roo
   const ctx = c.getContext("2d", { willReadFrequently: true })!;
   ctx.drawImage(sat, 0, 0, w, h);
   let rgba: Uint8ClampedArray;
-  try { rgba = ctx.getImageData(0, 0, w, h).data; } catch { return []; }
+  try { rgba = ctx.getImageData(0, 0, w, h).data; } catch { return { trees: [], grass: [], coverUsed: false }; }
 
   // Exclusión: edificios (con un margen de ~3 m por sombras/muros) y agua
   const ex = document.createElement("canvas");
@@ -149,7 +181,30 @@ export function detectTrees(sat: HTMLCanvasElement, data: CityData, sampler: Roo
   const exclude = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) exclude[i] = em[i * 4] > 127 ? 1 : 0;
 
-  const found = detectCanopy(rgba, w, h, mPerPx, exclude);
+  // Cobertura del suelo (si el servidor la entregó): raster con un código por píxel
+  let cover: Uint8Array | null = null;
+  if (data.cover?.length) {
+    try {
+      const cc = document.createElement("canvas");
+      cc.width = w; cc.height = h;
+      const cctx = cc.getContext("2d", { willReadFrequently: true })!;
+      cctx.fillStyle = "#000"; cctx.fillRect(0, 0, w, h);
+      for (const poly of data.cover) {
+        const code = coverCode(poly.subtype);
+        if (!code) continue;
+        cctx.fillStyle = `rgb(${code * 40},0,0)`;
+        cctx.beginPath();
+        poly.ring.forEach(([x, z], i) => (i ? cctx.lineTo(px(x), pz(z)) : cctx.moveTo(px(x), pz(z))));
+        cctx.closePath();
+        cctx.fill();
+      }
+      const cd = cctx.getImageData(0, 0, w, h).data;
+      cover = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) cover[i] = Math.min(6, Math.round(cd[i * 4] / 40));
+    } catch { cover = null; }
+  }
+
+  const found = detectCanopy(rgba, w, h, mPerPx, exclude, MAX_TREES, cover);
   const trees: Tree[] = [];
 
   // Árboles reales (puntos) primero
@@ -171,7 +226,83 @@ export function detectTrees(sat: HTMLCanvasElement, data: CityData, sampler: Roo
     }
     if (!near) trees.push({ x, z, r: f.r, color: f.color, lum: f.lum, dens: f.dens });
   }
-  return trees;
+  const grass = maxGrass > 0
+    ? detectGrass(rgba, w, h, mPerPx, exclude, cover, maxGrass).map((g) => ({ ...g, x: g.x + ext.minX, z: g.z + ext.minZ }))
+    : [];
+  return { trees, grass, coverUsed: !!cover };
+}
+
+
+export type GrassPatch = { x: number; z: number; size: number; color: [number, number, number] };
+
+/**
+ * Césped: vegetación verde (o pasto seco si la cobertura dice "grass") que NO es copa de árbol,
+ * fuera de edificios y agua. Un parche por celda (~2.4 m) con el color medio real de esa celda.
+ * La cobertura del suelo (ESA WorldCover vía Overture) decide los casos dudosos:
+ *   pasto/cultivo/matorral → umbral permisivo; urbano/suelo desnudo → umbral estricto; bosque → sin césped.
+ */
+export function detectGrass(
+  rgba: Uint8ClampedArray | Uint8Array,
+  w: number,
+  h: number,
+  mPerPx: number,
+  exclude: Uint8Array | null,
+  cover: Uint8Array | null,
+  maxPatches: number,
+): GrassPatch[] {
+  const n = w * h;
+  const isGrass = new Uint8Array(n);
+  let N = 0;
+  for (let i = 0; i < n; i++) {
+    if (exclude && exclude[i]) continue;
+    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+    const s = r + g + b;
+    if (s < 60) continue;
+    const exg = (2 * g - r - b) / s;
+    const lum = s / 765;
+    const cov = cover ? cover[i] : 0;
+    if (cov === COVER.FOREST) continue;
+    if (isCanopyPx(exg, lum, cov)) continue; // eso es árbol
+    let ok: boolean;
+    if (cov === COVER.GRASS) ok = exg > -0.04 && lum > 0.1 && lum < 0.78; // incluye pasto seco
+    else if (cov === COVER.SHRUB || cov === COVER.WETLAND) ok = exg > 0.0 && lum > 0.08 && lum < 0.7;
+    else if (cov === COVER.CROP) ok = exg > 0.03 && lum > 0.1 && lum < 0.75;
+    else if (cov === COVER.SEALED) ok = exg > 0.09 && lum > 0.1 && lum < 0.65;
+    else ok = exg > 0.045 && lum > 0.1 && lum < 0.7;
+    if (ok) { isGrass[i] = 1; N++; }
+  }
+  if (!N) return [];
+  const areaM2 = N * mPerPx * mPerPx;
+  const cellM = Math.max(2.4, Math.sqrt(areaM2 / maxPatches) * 1.05);
+  const cell = Math.max(2, Math.round(cellM / mPerPx));
+  const cw = Math.ceil(w / cell), ch = Math.ceil(h / cell);
+  const cnt = new Uint32Array(cw * ch), tot = new Uint32Array(cw * ch);
+  const sr = new Float64Array(cw * ch), sg = new Float64Array(cw * ch), sb = new Float64Array(cw * ch);
+  for (let y = 0; y < h; y++) {
+    const cy = Math.floor(y / cell);
+    for (let x = 0; x < w; x++) {
+      const ci = cy * cw + Math.floor(x / cell);
+      tot[ci]++;
+      const i = y * w + x;
+      if (isGrass[i]) { cnt[ci]++; sr[ci] += rgba[i * 4]; sg[ci] += rgba[i * 4 + 1]; sb[ci] += rgba[i * 4 + 2]; }
+    }
+  }
+  const out: GrassPatch[] = [];
+  for (let cy = 0; cy < ch; cy++) {
+    for (let cx = 0; cx < cw; cx++) {
+      const ci = cy * cw + cx;
+      if (cnt[ci] < 0.55 * tot[ci]) continue;
+      const k = cnt[ci] * 255;
+      const jx = hashN(cx * 7.3, cy * 3.1) - 0.5, jz = hashN(cx * 1.7, cy * 9.9) - 0.5;
+      out.push({
+        x: (cx + 0.5 + jx * 0.6) * cell * mPerPx,
+        z: (cy + 0.5 + jz * 0.6) * cell * mPerPx,
+        size: cell * mPerPx * 1.25,
+        color: [sr[ci] / k, sg[ci] / k, sb[ci] / k],
+      });
+    }
+  }
+  return out; // (x,z) en metros desde la esquina minX/minZ; el envoltorio los desplaza
 }
 
 const sm = (a: number, b: number, v: number) => {

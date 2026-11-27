@@ -10,4 +10,7 @@ export function attachLandData(data: CityData, land: LandResponse): void {
     .map((w) => ({ subtype: w.s, rings: w.r.map((ring) => ring.map(proj)) }))
     .filter((w) => w.rings[0] && w.rings[0].length >= 3 && ringArea(w.rings[0]) >= 30);
   data.osmTrees = land.trees.map(proj);
+  data.cover = (land.cover ?? [])
+    .map((c) => ({ subtype: c.s, ring: (c.r[0] ?? []).map(proj) }))
+    .filter((c) => c.ring.length >= 3 && ringArea(c.ring) >= 40);
 }

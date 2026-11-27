@@ -279,11 +279,14 @@ export function CityViewer({
         return;
       }
       scene.add(meshes.group);
+      // El agua refleja el cielo real de la escena y el sol
+      meshes.configureWater?.({ sun: dir.position.clone().normalize(), sky: skyTex, atmosphere });
 
       const applyLayers = (l: Layers) => {
         for (const m of meshes.buildings) m.visible = l.buildings;
         if (meshes.water) meshes.water.visible = l.water;
         if (meshes.trees) meshes.trees.visible = l.vegetation;
+        if (meshes.grass) meshes.grass.visible = l.vegetation;
         if (meshes.roofs) meshes.roofs.visible = l.buildings;
         meshes.terrain.visible = l.terrain;
       };
@@ -392,6 +395,7 @@ export function CityViewer({
         } else {
           orbit.update();
         }
+        meshes.update?.(timer.getElapsed());
         renderer.render(scene, camera);
       };
       loop();

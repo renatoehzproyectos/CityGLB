@@ -480,9 +480,12 @@ export const fetchOvertureLayerFn = createServerFn({ method: "POST" })
 export type LandResponse = {
   water: { s: string; r: [number, number][][] }[];
   trees: [number, number][];
+  /** Cobertura del suelo (Overture base/land_cover, derivada de ESA WorldCover a 10 m): forest, grass, shrub, crop… */
+  cover: { s: string; r: [number, number][][] }[];
 };
 
 const LAND_MAX_VERTS = 40000;
+const COVER_MAX_VERTS = 90000;
 const landCache = new Map<string, { data: LandResponse; expiresAt: number }>();
 
 function round5(n: number): number {
@@ -496,7 +499,7 @@ async function queryLandLayers(bbox: BBox): Promise<LandResponse> {
   if (hit && hit.expiresAt > Date.now()) return hit.data;
 
   const box = { minX: bbox.minLon, maxX: bbox.maxLon, minZ: bbox.minLat, maxZ: bbox.maxLat };
-  const out: LandResponse = { water: [], trees: [] };
+  const out: LandResponse = { water: [], trees: [], cover: [] };
 
   // --- agua ---
   try {
@@ -549,6 +552,39 @@ async function queryLandLayers(bbox: BBox): Promise<LandResponse> {
     }
   } catch (e) {
     console.warn("[overture] base/land (árboles) no disponible", e instanceof Error ? e.message : e);
+  }
+
+  // --- cobertura del suelo (bosque, pasto, matorral, cultivo, urbano…) ---
+  // Es lo más fiable que hay para separar "árbol de madera" de "césped": viene de clasificación ML
+  // global (ESA WorldCover) y se combina en el cliente con lo que se ve en la imagen satelital.
+  try {
+    const rows = await runOvertureQuery("base", "land_cover", release, ["id", "subtype", "geometry"], bbox, 5000);
+    let tol = 3e-5; // ~3 m
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const cover: LandResponse["cover"] = [];
+      let verts = 0;
+      for (const row of rows) {
+        const g = asGeoJsonGeometry(row.geometry);
+        if (!g || (g.type !== "Polygon" && g.type !== "MultiPolygon")) continue;
+        const polys = (g.type === "Polygon" ? [g.coordinates] : g.coordinates) as [number, number][][][];
+        for (const poly of polys) {
+          const outer = clipPolygonToBox(poly[0] as [number, number][], box);
+          if (!outer) continue;
+          const ring = simplifyRing([...outer, outer[0]], tol).slice(0, -1);
+          if (ring.length < 3) continue;
+          const r = [ring.map(([x, y]) => [round5(x), round5(y)] as [number, number])];
+          verts += ring.length;
+          cover.push({ s: String(row.subtype ?? "unknown"), r });
+        }
+      }
+      if (verts <= COVER_MAX_VERTS || attempt === 2) {
+        out.cover = verts <= COVER_MAX_VERTS * 1.5 ? cover : cover.slice(0, 4000);
+        break;
+      }
+      tol *= 3;
+    }
+  } catch (e) {
+    console.warn("[overture] base/land_cover no disponible (se usa solo la imagen satelital)", e instanceof Error ? e.message : e);
   }
 
   if (landCache.size >= 8) landCache.delete(landCache.keys().next().value as string);

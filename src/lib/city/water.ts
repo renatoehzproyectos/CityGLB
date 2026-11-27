@@ -9,6 +9,15 @@ import * as THREE from "three";
 import { clipPolygonToBox, ringArea, type LocalBox } from "./geo";
 import type { RoofSampler } from "./roofs";
 import type { Ring, WaterFeature } from "./types";
+import { createExportWaterMaterial, createSeaMaterial } from "./water-material";
+
+/** 0 = estanque/río (ondas pequeñas), 1 = mar abierto (olas largas). */
+function waveFor(kind: string): number {
+  if (kind === "ocean" || kind === "sea" || kind === "bay") return 1;
+  if (kind === "lake" || kind === "reservoir" || kind === "lagoon" || kind === "water" || !kind) return 0.5;
+  if (kind === "river" || kind === "stream" || kind === "canal" || kind === "drain" || kind === "ditch") return 0.3;
+  return 0.15; // estanques, piscinas, balsas…
+}
 
 const CELL_M = 250;
 const FLAT_KINDS = new Set(["lake", "pond", "reservoir", "ocean", "sea", "basin", "lagoon", "oxbow", "wastewater", "pool", "water", "bay"]);
@@ -55,7 +64,7 @@ const median = (v: number[]) => {
   return s[Math.floor(s.length / 2)];
 };
 
-type Piece = { outer: Ring; holes: Ring[]; flatLevel?: number; flatColor?: [number, number, number] };
+type Piece = { outer: Ring; holes: Ring[]; flatLevel?: number; flatColor?: [number, number, number]; wave: number };
 
 export function buildWaterMesh(
   features: WaterFeature[],
@@ -65,6 +74,8 @@ export function buildWaterMesh(
 ): { mesh: THREE.Mesh; count: number } | null {
   const pos: number[] = [];
   const col: number[] = [];
+  const wav: number[] = [];
+  const uvs: number[] = [];
   let count = 0;
 
   const emit = (p: Piece) => {
@@ -97,6 +108,8 @@ export function buildWaterMesh(
       for (const v of [a, b, c]) {
         pos.push(v.x, level, v.y);
         col.push(color[0], color[1], color[2]);
+        wav.push(p.wave);
+        uvs.push(v.x / 24, v.y / 24);
       }
     }
     count++;
@@ -114,7 +127,7 @@ export function buildWaterMesh(
       const pts = samplePoints(clipped, 8);
       const level = median(pts.map(([x, z]) => groundAt(x, z)));
       const holes = f.rings.slice(1).filter((h) => h.length >= 3 && ringArea(h) > 9 && h.every(([x, z]) => inside(x, z, clipped)));
-      emit({ outer: clipped, holes, flatLevel: level });
+      emit({ outer: clipped, holes, flatLevel: level, wave: waveFor(kind) });
       continue;
     }
     // Ríos / canales: celdas de CELL_M, cada una con su nivel
@@ -123,7 +136,7 @@ export function buildWaterMesh(
       for (let z = b.minZ; z < b.maxZ; z += CELL_M) {
         const cell: LocalBox = { minX: x, maxX: Math.min(x + CELL_M, b.maxX), minZ: z, maxZ: Math.min(z + CELL_M, b.maxZ) };
         const piece = clipPolygonToBox(clipped, cell);
-        if (piece) emit({ outer: piece, holes: [] });
+        if (piece) emit({ outer: piece, holes: [], wave: waveFor(kind || "river") });
       }
     }
   }
@@ -135,17 +148,13 @@ export function buildWaterMesh(
   const normals = new Float32Array(pos.length);
   for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
   geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.12,
-    metalness: 0,
-    side: THREE.DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-  });
+  geo.setAttribute("wave", new THREE.Float32BufferAttribute(wav, 1));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  const mobile = typeof navigator !== "undefined" && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+  const mat = createSeaMaterial(mobile);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.name = "water";
-  mesh.receiveShadow = true;
+  // material PBR para el GLB exportado (los shaders propios no viajan en un .glb)
+  mesh.userData.exportMaterial = createExportWaterMaterial();
   return { mesh, count };
 }

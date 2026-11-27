@@ -44,6 +44,8 @@ export type CityData = {
   water?: WaterFeature[];
   /** Árboles individuales reales (OSM vía Overture), en metros locales. */
   osmTrees?: [number, number][];
+  /** Cobertura del suelo (bosque, pasto, matorral, cultivo…), en metros locales. */
+  cover?: { subtype: string; ring: Ring }[];
 };
 
 export type CityStats = {
