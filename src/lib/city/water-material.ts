@@ -88,7 +88,7 @@ float seaOctave(vec2 uv, float choppy) {
 }
 
 // Altura de ola en metros para un punto del plano XZ.
-float seaHeight(vec2 xz, float t, float freq0, float amp0) {
+float seaHeight(vec2 xz, float t, float freq0, float amp0, float footprint) {
   float freq = freq0;
   float amp = amp0;
   float choppy = SEA_CHOPPY;
@@ -96,9 +96,12 @@ float seaHeight(vec2 xz, float t, float freq0, float amp0) {
   uv.x *= 0.75;
   float h = 0.0;
   for (int i = 0; i < ITER_FRAGMENT; i++) {
+    // longitud de onda de esta octava (m) vs. tamaño del píxel en el mundo: si es más fina, se apaga
+    float lambda = 6.2832 / (freq * 0.9);
+    float vis = smoothstep(footprint * 2.0, footprint * 7.0, lambda);
     float d = seaOctave((uv + t) * freq, choppy);
     d += seaOctave((uv - t) * freq, choppy);
-    h += d * amp;
+    h += d * amp * vis;
     uv *= OCTAVE_M;
     freq *= 1.9;
     amp *= 0.22;
@@ -131,10 +134,11 @@ void main() {
   float t = uTime * speed;
 
   // Normal por diferencias finitas; el paso crece con la distancia (menos aliasing).
-  float eps = clamp(dist * 0.0012, 0.04, 6.0);
-  float h0 = seaHeight(vWorld.xz, t, freq, amp);
-  float hx = seaHeight(vWorld.xz + vec2(eps, 0.0), t, freq, amp);
-  float hz = seaHeight(vWorld.xz + vec2(0.0, eps), t, freq, amp);
+  float footprint = max(dist * 0.0016, 0.02); // metros por píxel aprox.
+  float eps = clamp(footprint * 1.5, 0.04, 8.0);
+  float h0 = seaHeight(vWorld.xz, t, freq, amp, footprint);
+  float hx = seaHeight(vWorld.xz + vec2(eps, 0.0), t, freq, amp, footprint);
+  float hz = seaHeight(vWorld.xz + vec2(0.0, eps), t, freq, amp, footprint);
   vec2 slope = vec2(hx - h0, hz - h0) / eps;
   // el relieve se apaga a lo lejos: el agua lejana es un espejo uniforme sin parpadeo
   float far = 1.0 - smoothstep(350.0, 2600.0, dist);
@@ -164,7 +168,8 @@ void main() {
   vec3 H = normalize(L + V);
   float s1 = pow(max(dot(N, H), 0.0), 220.0) * (220.0 + 8.0) / (PI * 8.0);
   float s2 = pow(max(dot(N, H), 0.0), 28.0) * 0.06;
-  col += vec3(1.0, 0.93, 0.8) * (s1 * 0.08 + s2) * step(0.0, L.y);
+  float glint = mix(0.15, 1.0, far); // lejos, el destello puntual se vuelve un brillo suave (evita el granulado)
+  col += vec3(1.0, 0.93, 0.8) * (s1 * 0.08 * glint + s2) * step(0.0, L.y);
 
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>

@@ -63,6 +63,11 @@ const median = (v: number[]) => {
   const s = v.slice().sort((a, b) => a - b);
   return s[Math.floor(s.length / 2)];
 };
+/** Cuantil q∈[0,1]: el terreno bajo el agua trae "picos" (barcos, puentes) que asoman si se usa la mediana. */
+const quantile = (v: number[], q: number) => {
+  const s = v.slice().sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(s.length * q))];
+};
 
 type Piece = { outer: Ring; holes: Ring[]; flatLevel?: number; flatColor?: [number, number, number]; wave: number };
 
@@ -82,7 +87,7 @@ export function buildWaterMesh(
     if (ringArea(p.outer) < 4) return;
     // Nivel y color a partir de los puntos interiores
     const pts = samplePoints(p.outer);
-    const level = (p.flatLevel ?? median(pts.map(([x, z]) => groundAt(x, z)))) + 0.05;
+    const level = (p.flatLevel ?? quantile(pts.map(([x, z]) => groundAt(x, z)), 0.7)) + 0.12;
     let color = p.flatColor;
     if (!color) {
       let r = 0, g = 0, b = 0, n = 0;
@@ -125,18 +130,24 @@ export function buildWaterMesh(
 
     if (flat) {
       const pts = samplePoints(clipped, 8);
-      const level = median(pts.map(([x, z]) => groundAt(x, z)));
+      const level = quantile(pts.map(([x, z]) => groundAt(x, z)), 0.7);
       const holes = f.rings.slice(1).filter((h) => h.length >= 3 && ringArea(h) > 9 && h.every(([x, z]) => inside(x, z, clipped)));
       emit({ outer: clipped, holes, flatLevel: level, wave: waveFor(kind) });
       continue;
     }
-    // Ríos / canales: celdas de CELL_M, cada una con su nivel
+    // Ríos / canales: celdas de CELL_M, cada una con su nivel; el COLOR es uno solo por cuerpo (sin franjas)
+    const rc: number[][] = [[], [], []];
+    for (const [x, z] of samplePoints(clipped, 14)) {
+      const c = sampler?.(x, z);
+      if (c) { rc[0].push(c[0]); rc[1].push(c[1]); rc[2].push(c[2]); }
+    }
+    const riverColor: [number, number, number] | undefined = rc[0].length ? [median(rc[0]), median(rc[1]), median(rc[2])] : undefined;
     const b = bounds(clipped);
     for (let x = b.minX; x < b.maxX; x += CELL_M) {
       for (let z = b.minZ; z < b.maxZ; z += CELL_M) {
         const cell: LocalBox = { minX: x, maxX: Math.min(x + CELL_M, b.maxX), minZ: z, maxZ: Math.min(z + CELL_M, b.maxZ) };
         const piece = clipPolygonToBox(clipped, cell);
-        if (piece) emit({ outer: piece, holes: [], wave: waveFor(kind || "river") });
+        if (piece) emit({ outer: piece, holes: [], wave: waveFor(kind || "river"), flatColor: riverColor });
       }
     }
   }

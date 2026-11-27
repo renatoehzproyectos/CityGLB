@@ -14,74 +14,103 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { buildTreesMesh, type GrassPatch, type Tree } from "./vegetation";
 
-const TREE_URL = "/models/tree.glb";
-const GRASS_URL = "/models/grass.glb";
-
 type Part = { kind: string; geometry: THREE.BufferGeometry; material: THREE.MeshStandardMaterial };
+type TreeSet = { parts: Part[]; width: number }[]; // altura normalizada = 1
 type VegAssets = {
-  treeVariants: { parts: Part[]; width: number }[]; // altura normalizada = 1
-  grassParts: Part[]; // ancho normalizado = 1
+  lod0: TreeSet | null; // modelo completo
+  lod1: TreeSet | null; // modelo ligero (pocas tarjetas, sin ramas)
+  grassParts: Part[] | null; // ancho normalizado = 1
 };
 
-let assetsPromise: Promise<VegAssets | null> | null = null;
+let assetsPromise: Promise<VegAssets> | null = null;
 
 function isMobile(): boolean {
   return typeof navigator !== "undefined" && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
 }
 
-function collect(root: THREE.Object3D): { mesh: THREE.Mesh; owner: THREE.Object3D }[] {
+function collect(root: THREE.Object3D): THREE.Mesh[] {
   root.updateMatrixWorld(true);
-  const out: { mesh: THREE.Mesh; owner: THREE.Object3D }[] = [];
+  const out: THREE.Mesh[] = [];
   root.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (m.isMesh) out.push({ mesh: m, owner: m });
+    if (m.isMesh) out.push(m);
   });
   return out;
 }
 
-function loadAssets(): Promise<VegAssets | null> {
+function b64ToBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+}
+
+function parseGlb(loader: GLTFLoader, b64: string): Promise<THREE.Group> {
+  return new Promise((resolve, reject) => loader.parse(b64ToBuffer(b64), "", (g) => resolve(g.scene), reject));
+}
+
+function treeSetFrom(scene: THREE.Object3D): TreeSet | null {
+  const variants: TreeSet = [];
+  for (let k = 0; k < 6; k++) {
+    const node = scene.getObjectByName(`tree_v${k}`);
+    if (!node) break;
+    const parts: Part[] = [];
+    const box = new THREE.Box3();
+    for (const mesh of collect(node)) {
+      const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      parts.push({ kind: mat.name || "Leaf", geometry: geo, material: mat });
+      geo.computeBoundingBox();
+      box.union(geo.boundingBox!);
+    }
+    if (parts.length) variants.push({ parts, width: Math.max(0.3, box.max.x - box.min.x) });
+  }
+  return variants.length ? variants : null;
+}
+
+/** Cada modelo se carga por separado: si uno falla, los demás siguen funcionando. */
+function loadAssets(): Promise<VegAssets> {
   if (assetsPromise) return assetsPromise;
   assetsPromise = (async () => {
+    const res: VegAssets = { lod0: null, lod1: null, grassParts: null };
+    let a: typeof import("./vegetation-assets");
     try {
-      const loader = new GLTFLoader();
-      const [tree, grass] = await Promise.all([loader.loadAsync(TREE_URL), loader.loadAsync(GRASS_URL)]);
-
-      // ---- árboles: nodo tree_v0/1/2 → partes por material
-      const variants: VegAssets["treeVariants"] = [];
-      for (let k = 0; k < 6; k++) {
-        const node = tree.scene.getObjectByName(`tree_v${k}`);
-        if (!node) break;
-        const parts: Part[] = [];
-        const box = new THREE.Box3();
-        for (const { mesh } of collect(node)) {
-          const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-          const mat = mesh.material as THREE.MeshStandardMaterial;
-          parts.push({ kind: mat.name || "Leaf", geometry: geo, material: mat });
-          geo.computeBoundingBox();
-          box.union(geo.boundingBox!);
-        }
-        if (parts.length) variants.push({ parts, width: Math.max(0.3, box.max.x - box.min.x) });
-      }
-      if (!variants.length) return null;
-
-      // ---- césped: se fusionan las mallas que comparten material
+      a = await import("./vegetation-assets");
+    } catch (e) {
+      console.error("[vegetation] no se pudo cargar el módulo de modelos", e);
+      return res;
+    }
+    const loader = new GLTFLoader();
+    try {
+      res.lod0 = treeSetFrom(await parseGlb(loader, a.TREE_LOD0_B64));
+    } catch (e) {
+      console.error("[vegetation] árbol (detalle alto) no cargó", e);
+    }
+    try {
+      res.lod1 = treeSetFrom(await parseGlb(loader, a.TREE_LOD1_B64));
+    } catch (e) {
+      console.error("[vegetation] árbol (detalle bajo) no cargó", e);
+    }
+    try {
+      const scene = await parseGlb(loader, a.GRASS_B64);
       const byMat = new Map<THREE.Material, THREE.BufferGeometry[]>();
-      for (const { mesh } of collect(grass.scene)) {
+      for (const mesh of collect(scene)) {
         const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
         const m = mesh.material as THREE.Material;
         if (!byMat.has(m)) byMat.set(m, []);
         byMat.get(m)!.push(geo);
       }
-      const grassParts: Part[] = [];
+      const parts: Part[] = [];
       for (const [mat, geos] of byMat) {
         const merged = geos.length > 1 ? mergeGeometries(geos, false) : geos[0];
-        if (merged) grassParts.push({ kind: "Grass", geometry: merged, material: mat as THREE.MeshStandardMaterial });
+        if (merged) parts.push({ kind: "Grass", geometry: merged, material: mat as THREE.MeshStandardMaterial });
       }
-      return { treeVariants: variants, grassParts };
+      res.grassParts = parts.length ? parts : null;
     } catch (e) {
-      console.warn("[vegetation] no se pudieron cargar tree.glb / grass.glb; se usa la malla simple", e);
-      return null;
+      console.error("[vegetation] césped no cargó", e);
     }
+    console.info("[vegetation] modelos:", { lod0: !!res.lod0, lod1: !!res.lod1, grass: !!res.grassParts });
+    return res;
   })();
   return assetsPromise;
 }
@@ -125,6 +154,8 @@ export type VegetationResult = {
   trees?: THREE.Group;
   grass?: THREE.Group;
   treeCount: number;
+  /** árboles dibujados con modelo 3D (completo o ligero) */
+  treeModels: number;
   grassCount: number;
   /** vértices de las mallas base (estadística) */
   vertices: number;
@@ -138,77 +169,109 @@ const sm = (a: number, b: number, v: number) => {
   return t * t * (3 - 2 * t);
 };
 
-export async function buildVegetation(trees: Tree[], grass: GrassPatch[], groundAt: Ground): Promise<VegetationResult> {
+/** Un nivel de detalle: instancia las variantes del modelo para la lista de árboles dada. */
+function addTreeTier(
+  group: THREE.Group,
+  set: TreeSet,
+  list: Tree[],
+  groundAt: Ground,
+  wind: { value: number },
+  tag: string,
+  castShadow: boolean,
+): number {
+  const per: { m: THREE.Matrix4; c: THREE.Color }[][] = set.map(() => []);
+  const dummy = new THREE.Object3D();
+  for (const t of list) {
+    const h = hash(t.x, t.z);
+    const hgt = Math.min(18, Math.max(3.5, 3.2 + 1.9 * t.r));
+    const vi = Math.min(set.length - 1, Math.floor(h * set.length * 0.999));
+    const g = groundAt ? groundAt(t.x, t.z) : 0;
+    // el DSM ya incluye el dosel: en zonas densas la base se hunde para no flotar
+    const base = g - (groundAt ? hgt * 0.55 * sm(0.35, 0.85, t.dens) : 0);
+    const sxz = Math.min(hgt * 1.5, (2 * t.r * 1.15) / set[vi].width);
+    const jitter = 0.9 + hash(t.z, t.x) * 0.25;
+    dummy.position.set(t.x, base, t.z);
+    dummy.rotation.set(0, h * Math.PI * 2, 0);
+    dummy.scale.set(sxz * jitter, hgt, sxz * jitter);
+    dummy.updateMatrix();
+    const v = 0.9 + hash(t.x * 1.3, t.z * 0.7) * 0.25;
+    per[vi].push({
+      m: dummy.matrix.clone(),
+      c: new THREE.Color(Math.min(1, t.color[0] * 1.4 * v), Math.min(1, t.color[1] * 1.55 * v), Math.min(1, t.color[2] * 1.35 * v)),
+    });
+  }
+  let verts = 0;
+  set.forEach((variant, vi) => {
+    const inst = per[vi];
+    if (!inst.length) return;
+    for (const part of variant.parts) {
+      const foliage = part.kind === "Leaf";
+      const mat = cloneMat(part.material, part.kind === "Branch" ? { color: new THREE.Color(0.55, 0.4, 0.28) } : {});
+      if (part.kind !== "Bark") addWind(mat, wind, part.kind === "Leaf" ? 0.035 : 0.02, `tree-${part.kind}`);
+      const mesh = new THREE.InstancedMesh(part.geometry.clone(), mat, inst.length);
+      mesh.name = `tree_${tag}_v${vi}_${part.kind}`;
+      let ar = 0, ag = 0, ab = 0;
+      inst.forEach((it, i) => {
+        mesh.setMatrixAt(i, it.m);
+        if (foliage) { mesh.setColorAt(i, it.c); ar += it.c.r; ag += it.c.g; ab += it.c.b; }
+      });
+      if (foliage) mesh.userData.avgTint = [ar / inst.length, ag / inst.length, ab / inst.length];
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      mesh.castShadow = castShadow;
+      mesh.receiveShadow = false;
+      group.add(mesh);
+      verts += part.geometry.getAttribute("position").count;
+    }
+  });
+  return verts;
+}
+
+export async function buildVegetation(
+  trees: Tree[],
+  grass: GrassPatch[],
+  groundAt: Ground,
+  center: { x: number; z: number } = { x: 0, z: 0 },
+): Promise<VegetationResult> {
   const wind = { value: 0 };
-  const res: VegetationResult = { treeCount: trees.length, grassCount: 0, vertices: 0, tick: (t) => { wind.value = t; } };
+  const res: VegetationResult = {
+    treeCount: trees.length,
+    treeModels: 0,
+    grassCount: 0,
+    vertices: 0,
+    tick: (t) => { wind.value = t; },
+  };
   if (!trees.length && !grass.length) return res;
 
   const assets = await loadAssets();
   const mobile = isMobile();
 
   // ---------------- ÁRBOLES ----------------
+  // Tres niveles, de más a menos detalle, según cercanía al centro de la escena (donde suele estar la cámara):
+  //   1) modelo completo  2) modelo ligero  3) malla simple de respaldo (sin cupo)
   if (trees.length) {
     const group = new THREE.Group();
     group.name = "trees";
-    const cap = assets ? (mobile ? 1000 : 4000) : 0;
-    // los de copa más grande (más visibles) usan el modelo 3D; el resto, la malla simple
-    const sorted = trees.slice().sort((a, b) => b.r - a.r || a.x - b.x);
-    const detailed = sorted.slice(0, cap);
-    const simple = sorted.slice(cap);
+    const sorted = trees
+      .slice()
+      .sort((a, b) => (a.x - center.x) ** 2 + (a.z - center.z) ** 2 - ((b.x - center.x) ** 2 + (b.z - center.z) ** 2));
+    const cap0 = assets.lod0 ? (mobile ? 500 : 2500) : 0;
+    const cap1 = assets.lod1 ? (mobile ? 3500 : 9000) : 0;
+    const t0 = sorted.slice(0, cap0);
+    const t1 = sorted.slice(cap0, cap0 + cap1);
+    // si falta el modelo completo, el ligero ocupa también ese cupo
+    const lightList = assets.lod0 ? t1 : sorted.slice(0, cap1 + (mobile ? 500 : 2500));
+    const rest = sorted.slice(assets.lod0 ? cap0 + cap1 : lightList.length);
 
-    if (assets && detailed.length) {
-      const V = assets.treeVariants;
-      const per: { m: THREE.Matrix4; c: THREE.Color }[][] = V.map(() => []);
-      const dummy = new THREE.Object3D();
-      for (const t of detailed) {
-        const h = hash(t.x, t.z);
-        const hgt = Math.min(18, Math.max(3.5, 3.2 + 1.9 * t.r));
-        const vi = Math.min(V.length - 1, Math.floor(h * V.length * 0.999));
-        const g = groundAt ? groundAt(t.x, t.z) : 0;
-        // el DSM ya incluye el dosel: en zonas densas la base se hunde para no flotar
-        const base = g - (groundAt ? hgt * 0.55 * sm(0.35, 0.85, t.dens) : 0);
-        const sxz = Math.min(hgt * 1.5, (2 * t.r * 1.15) / V[vi].width);
-        const jitter = 0.9 + hash(t.z, t.x) * 0.25;
-        dummy.position.set(t.x, base, t.z);
-        dummy.rotation.set(0, h * Math.PI * 2, 0);
-        dummy.scale.set(sxz * jitter, hgt, sxz * jitter);
-        dummy.updateMatrix();
-        const v = 0.9 + hash(t.x * 1.3, t.z * 0.7) * 0.25;
-        per[vi].push({
-          m: dummy.matrix.clone(),
-          c: new THREE.Color(Math.min(1, t.color[0] * 1.4 * v), Math.min(1, t.color[1] * 1.55 * v), Math.min(1, t.color[2] * 1.35 * v)),
-        });
-      }
-      V.forEach((variant, vi) => {
-        const inst = per[vi];
-        if (!inst.length) return;
-        for (const part of variant.parts) {
-          const foliage = part.kind === "Leaf";
-          const mat = cloneMat(
-            part.material,
-            part.kind === "Branch" ? { color: new THREE.Color(0.55, 0.4, 0.28) } : part.kind === "Bark" ? {} : {},
-          );
-          if (part.kind !== "Bark") addWind(mat, wind, part.kind === "Leaf" ? 0.035 : 0.02, `tree-${part.kind}`);
-          const mesh = new THREE.InstancedMesh(part.geometry.clone(), mat, inst.length);
-          mesh.name = `tree_v${vi}_${part.kind}`;
-          let ar = 0, ag = 0, ab = 0;
-          inst.forEach((it, i) => {
-            mesh.setMatrixAt(i, it.m);
-            if (foliage) { mesh.setColorAt(i, it.c); ar += it.c.r; ag += it.c.g; ab += it.c.b; }
-          });
-          if (foliage) mesh.userData.avgTint = [ar / inst.length, ag / inst.length, ab / inst.length];
-          mesh.instanceMatrix.needsUpdate = true;
-          if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-          mesh.computeBoundingSphere();
-          mesh.castShadow = true;
-          mesh.receiveShadow = false;
-          group.add(mesh);
-          res.vertices += part.geometry.getAttribute("position").count;
-        }
-      });
+    if (assets.lod0 && t0.length) {
+      res.vertices += addTreeTier(group, assets.lod0, t0, groundAt, wind, "hi", true);
+      res.treeModels += t0.length;
     }
-
-    const rest = assets ? simple : sorted;
+    if (assets.lod1 && lightList.length) {
+      res.vertices += addTreeTier(group, assets.lod1, lightList, groundAt, wind, "lo", true);
+      res.treeModels += lightList.length;
+    }
     const legacy = buildTreesMesh(rest, groundAt);
     if (legacy) {
       group.add(legacy);
@@ -218,7 +281,7 @@ export async function buildVegetation(trees: Tree[], grass: GrassPatch[], ground
   }
 
   // ---------------- CÉSPED ----------------
-  if (assets && grass.length) {
+  if (assets.grassParts && grass.length) {
     const cap = mobile ? 2500 : 9000;
     const use = grass.length > cap ? grass.filter((_, i) => i % Math.ceil(grass.length / cap) === 0) : grass;
     const group = new THREE.Group();

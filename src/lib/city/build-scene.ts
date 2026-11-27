@@ -606,7 +606,7 @@ export type CityMeshes = {
   update?: (timeSec: number) => void;
   /** Pasa al agua el sol y el cielo de la escena para sus reflejos. */
   configureWater?: (c: WaterConfig) => void;
-  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; waterBodies: number; streetBuildings: number; streetMaterials: number };
+  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; treeModels: number; grassPatches: number; waterBodies: number; streetBuildings: number; streetMaterials: number };
   heightGrid?: HeightGrid | null;
 };
 
@@ -772,6 +772,8 @@ export async function buildCityMeshes(
   let treesObj: THREE.Object3D | undefined;
   let grassObj: THREE.Object3D | undefined;
   let treeCount = 0;
+  let treeModels = 0;
+  let grassPatches = 0;
   let vegTick: ((t: number) => void) | undefined;
   if (satCanvas || data.osmTrees?.length) {
     try {
@@ -779,7 +781,12 @@ export async function buildCityMeshes(
       const veg = satCanvas
         ? analyzeVegetation(satCanvas, data, roofSampler)
         : { trees: [], grass: [], coverUsed: false };
-      const built = await buildVegetation(veg.trees, veg.grass, groundAt);
+      const built = await buildVegetation(veg.trees, veg.grass, groundAt, {
+        x: (data.extent.minX + data.extent.maxX) / 2,
+        z: (data.extent.minZ + data.extent.maxZ) / 2,
+      });
+      treeModels = built.treeModels;
+      grassPatches = built.grassCount;
       vegTick = built.tick;
       if (built.trees) {
         treesObj = built.trees;
@@ -818,6 +825,8 @@ export async function buildCityMeshes(
       vertices,
       aiBuildings: data.buildings.reduce((n, b) => n + (b.ai ? 1 : 0), 0),
       trees: treeCount,
+      treeModels,
+      grassPatches,
       waterBodies,
       streetBuildings: data.buildings.reduce((n, b) => n + (b.street ? 1 : 0), 0),
       streetMaterials: data.buildings.reduce((n, b) => n + (b.streetMaterial ? 1 : 0), 0),

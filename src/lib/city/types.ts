@@ -54,6 +54,9 @@ export type CityStats = {
   /** Edificios con datos estimados por IA. */
   aiBuildings?: number;
   trees?: number;
+  /** Árboles dibujados con modelo 3D (el resto, malla simple). */
+  treeModels?: number;
+  grassPatches?: number;
   waterBodies?: number;
   streetBuildings?: number;
   streetMaterials?: number;

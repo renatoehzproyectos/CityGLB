@@ -205,6 +205,18 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.trees ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.treeModels ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">3D trees</dt>
+                      <dd className="text-right">{(stats.treeModels ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
+                  {(stats.grassPatches ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Grass patches</dt>
+                      <dd className="text-right">{(stats.grassPatches ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   {(stats.waterBodies ?? 0) > 0 && (
                     <>
                       <dt className="text-muted">Water bodies</dt>
