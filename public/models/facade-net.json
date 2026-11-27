@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "input_size": 112,
+  "materials": [
+    "brick",
+    "concrete",
+    "glass",
+    "stucco",
+    "stone",
+    "metal",
+    "wood"
+  ],
+  "metrics": {
+    "acc": 0.5460122699386503,
+    "balanced_acc": 0.2718,
+    "majority_baseline": 0.5766871165644172,
+    "recall": {
+      "brick": 0.681,
+      "concrete": 0.167,
+      "glass": 0.0,
+      "stucco": 0.0,
+      "stone": 0.511
+    },
+    "n_val": 163
+  }
+}

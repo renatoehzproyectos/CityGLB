@@ -597,7 +597,7 @@ export type CityMeshes = {
   terrain: THREE.Mesh;
   water?: THREE.Mesh;
   trees?: THREE.Mesh;
-  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; waterBodies: number; streetBuildings: number };
+  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; waterBodies: number; streetBuildings: number; streetMaterials: number };
   heightGrid?: HeightGrid | null;
 };
 
@@ -794,6 +794,7 @@ export async function buildCityMeshes(
       trees: treeCount,
       waterBodies,
       streetBuildings: data.buildings.reduce((n, b) => n + (b.street ? 1 : 0), 0),
+      streetMaterials: data.buildings.reduce((n, b) => n + (b.streetMaterial ? 1 : 0), 0),
     },
     heightGrid: grid,
   };

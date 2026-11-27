@@ -5,12 +5,15 @@
 import { fetchStreetThumbsFn, listStreetImagesFn } from "./mapillary";
 import { project } from "./geo";
 import { colorFromCrop } from "./street-color";
+import { loadFacadeNet, predictFacadeMaterials, resizeCropRGB, writeTensor } from "./facade-net";
 import { selectViews, type LocalImage } from "./street-select";
 import type { CityData } from "./types";
 import { ringArea } from "./geo";
 
 export type StreetResult = {
   applied: number;
+  /** Edificios cuyo material salió del modelo propio de fachadas. */
+  materials?: number;
   candidates: number;
   notConfigured?: boolean;
   warning?: string;
@@ -70,7 +73,10 @@ export async function enrichFacadeColorsFromStreet(
   const batches: string[][] = [];
   for (let i = 0; i < ids.length; i += BATCH) batches.push(ids.slice(i, i + BATCH));
 
-  let applied = 0, done = 0, next = 0;
+  // Modelo de fachadas (opcional: sin él solo se aplica el color)
+  const net = await loadFacadeNet();
+  const S = net?.size ?? 112;
+  let applied = 0, materials = 0, done = 0, next = 0;
   let warning: string | undefined;
   let notConfigured = false;
   onProgress?.(0, batches.length);
@@ -85,6 +91,7 @@ export async function enrichFacadeColorsFromStreet(
           if (res.reason === "not_configured") notConfigured = true;
           warning ??= res.message;
         } else {
+          const pend: { bi: number; rgb: Uint8ClampedArray }[] = [];
           for (const t of res.thumbs) {
             const img = await decode(t.data);
             if (!img) continue;
@@ -98,6 +105,27 @@ export async function enrichFacadeColorsFromStreet(
               b.facade = [Math.min(1, col.color[0] * 1.06), Math.min(1, col.color[1] * 1.06), Math.min(1, col.color[2] * 1.06)];
               b.street = true;
               applied++;
+              if (net && !b.streetMaterial) {
+                const box: [number, number, number, number] = [p.crop.u0 * img.w, p.crop.v0 * img.h, p.crop.u1 * img.w, p.crop.v1 * img.h];
+                pend.push({ bi: p.bi, rgb: resizeCropRGB(img.data, img.w, img.h, box, S) });
+              }
+            }
+          }
+          if (net && pend.length) {
+            try {
+              const input = new Float32Array(pend.length * 3 * S * S);
+              pend.forEach((q, n) => writeTensor(q.rgb, S, input, n));
+              const preds = await predictFacadeMaterials(net, input, pend.length);
+              preds.forEach((pr, n) => {
+                const b = data.buildings[pend[n].bi];
+                if (pr.p >= 0.5 && !b.streetMaterial) {
+                  b.material = pr.cls;
+                  b.streetMaterial = true;
+                  materials++;
+                }
+              });
+            } catch (e) {
+              console.warn("[street] modelo de fachadas falló", e);
             }
           }
         }
@@ -108,5 +136,5 @@ export async function enrichFacadeColorsFromStreet(
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker));
-  return { applied, candidates: order.length, notConfigured, warning };
+  return { applied, materials, candidates: order.length, notConfigured, warning };
 }

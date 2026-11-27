@@ -24,6 +24,8 @@ export type BuildingFeature = {
   ai?: boolean;
   /** El color de fachada viene de una foto de calle (Mapillary). */
   street?: boolean;
+  /** El material de fachada viene del modelo propio sobre la foto de calle (manda sobre el aéreo). */
+  streetMaterial?: boolean;
 };
 
 /** Cuerpo de agua real (Overture base/water), en metros locales. rings[0] = exterior, el resto islas. */
@@ -52,6 +54,7 @@ export type CityStats = {
   trees?: number;
   waterBodies?: number;
   streetBuildings?: number;
+  streetMaterials?: number;
 };
 
 export type PlaceHit = {

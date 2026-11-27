@@ -193,6 +193,12 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.streetBuildings ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.streetMaterials ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Street-photo materials</dt>
+                      <dd className="text-right">{(stats.streetMaterials ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   {(stats.trees ?? 0) > 0 && (
                     <>
                       <dt className="text-muted">Trees</dt>
@@ -239,13 +245,13 @@ export function ControlPanel({ exportFn }: Props) {
                   Esri World Imagery · no API key · remeshes the scene
                 </p>
                 <RowSwitch
-                  label="Color real de fachadas (fotos de calle)"
+                  label="Fachadas reales (color y material, fotos de calle)"
                   checked={streetColors}
                   onCheckedChange={setStreetColors}
                 />
                 <p className="text-[10px] leading-snug text-subtle">
-                  Toma el color de cada fachada de la foto de calle más cercana. Requiere MAPILLARY_TOKEN en el
-                  servidor. Imágenes: Mapillary, CC BY-SA.
+                  Toma el color de cada fachada de la foto de calle más cercana y, si existe facade-net.onnx en
+                  /models, también su material. Requiere MAPILLARY_TOKEN en el servidor. Imágenes: Mapillary, CC BY-SA.
                 </p>
                 <RowSwitch
                   label="IA propia de edificios (altura, techo, material)"

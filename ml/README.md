@@ -50,3 +50,23 @@ espaciales (~500 m), así que las métricas no se inflan por vecindad.
   comprueba y rechaza un modelo incompatible).
 - Si cambias `INPUT_SIZE` o `WINDOW_M`, reentrena: el visor los lee del `.json`.
 - Mejora típica: más ciudades, más épocas, y datos de zonas con alturas verificadas.
+
+---
+
+# Modelo de fachadas (FacadeNet) — fotos de calle
+
+Clasifica el **material** de una fachada (brick, concrete, glass, stucco, stone, metal, wood) desde el
+recorte de una foto de calle de Mapillary. Es un fine-tuning de MobileNetV3-small (pesos ImageNet),
+porque hay pocos edificios con material etiquetado en Overture.
+
+Flujo: `build_facade_dataset.py` (Overture + Mapillary) → `train_facade.py` → `facade-net.onnx` + `.json`.
+`street.py` es un port exacto de `street-select.ts` / `street-color.ts`: la app y el entrenamiento
+recortan igual (verificado: misma selección, mismo color, remuestreo a ≤1/255 de PIL).
+
+    export MAPILLARY_TOKEN='MLY|...'
+    python build_facade_dataset.py --bbox MIN_LON MIN_LAT MAX_LON MAX_LAT --count-only   # ¿hay datos?
+    python build_facade_dataset.py --bbox ... --out data_facade/ciudad1.npz
+    python train_facade.py --data data_facade --epochs 25 --out ../public/models/facade-net.onnx
+
+El entrenamiento imprime la exactitud y la de "adivinar siempre la clase más común": si no la
+supera, el modelo no aporta. Ojo con las licencias de las fotos (CC BY-SA, Mapillary).
