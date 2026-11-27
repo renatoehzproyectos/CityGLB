@@ -11,7 +11,9 @@ import { fetchCityTiled } from "@/lib/city/tiles";
 import { enrichBuildingsWithAI } from "@/lib/city/ai-enrich";
 import { fetchLandLayersFn } from "@/lib/city/fetch-overture";
 import { attachLandData } from "@/lib/city/land-data";
-import { enrichFacadeColorsFromStreet } from "@/lib/city/street-enrich";
+import { enrichFacadeColorsFromStreet, prefetchStreetList } from "@/lib/city/street-enrich";
+import { loadFacadeNet } from "@/lib/city/facade-net";
+import { loadBuildingNet } from "@/lib/city/building-net";
 import { toast } from "sonner";
 
 type Layers = {
@@ -211,6 +213,17 @@ export const useStudio = create<StudioState>((set, get) => ({
           flatTerrain: false,
         });
       }
+      // Todo lo que solo depende del bbox o de los modelos arranca YA, en paralelo con Overture:
+      // agua/árboles, lista de fotos de calle y descarga + inicialización de los modelos ONNX.
+      const landP = fetchLandLayersFn({
+        data: { minLon: box.minLon, minLat: box.minLat, maxLon: box.maxLon, maxLat: box.maxLat },
+      }).catch((e) => {
+        console.warn("[generate] agua/árboles no disponibles", e);
+        return null;
+      });
+      const streetListP = get().streetColors ? prefetchStreetList(box) : undefined;
+      if (get().streetColors) void loadFacadeNet();
+      if (get().aiBuildings) void loadBuildingNet();
 
       // Una sola petición: el servidor consulta edificios, calles y agua en paralelo.
       set({ progress: 8, progressLabel: "Loading buildings…" });
@@ -226,6 +239,7 @@ export const useStudio = create<StudioState>((set, get) => ({
             progress: 8 + Math.round((done / total) * 32),
             progressLabel: `Loading city tiles ${done}/${total}…`,
           }),
+        6,
       );
       const overtureBuildings = data?.buildings?.length ?? 0;
 
@@ -252,21 +266,30 @@ export const useStudio = create<StudioState>((set, get) => ({
       if (!data || !data.extent) {
         throw new Error("No map data returned for this area.");
       }
-      // Agua y árboles reales (opcional: si falla, se genera sin ellos)
-      try {
-        set({ progress: 39, progressLabel: "Cargando agua y vegetación…" });
-        const land = await fetchLandLayersFn({
-          data: { minLon: box.minLon, minLat: box.minLat, maxLon: box.maxLon, maxLat: box.maxLat },
+      // Agua/árboles (ya descargados en paralelo), fotos de calle e IA de edificios corren A LA VEZ.
+      // Son independientes: la calle solo escribe fachada/material de calle; la IA, altura/techo,
+      // y nunca pisa un material que ya viene de la calle.
+      const landDone = landP.then((land) => {
+        if (land) attachLandData(data, land);
+      });
+      let streetFrac = 0, aiFrac = 0;
+      const report = () =>
+        set({
+          progress: 40 + Math.round(((streetFrac + aiFrac) / 2) * 5),
+          progressLabel: `Fotos de calle y IA… ${Math.round(((streetFrac + aiFrac) / 2) * 100)}%`,
         });
-        attachLandData(data, land);
-      } catch (e) {
-        console.warn("[generate] agua/árboles no disponibles", e);
-      }
-      if (get().streetColors) {
+      set({ progress: 40, progressLabel: "Fotos de calle y IA de edificios…" });
+
+      const streetTask = async () => {
+        if (!get().streetColors) return;
         try {
-          set({ progress: 40, progressLabel: "Fotos de calle: buscando fachadas…" });
-          const res = await enrichFacadeColorsFromStreet(data, (done, total) =>
-            set({ progress: 40, progressLabel: `Fotos de calle: ${done}/${total}…` }),
+          const res = await enrichFacadeColorsFromStreet(
+            data,
+            (done, total) => {
+              streetFrac = done / Math.max(1, total);
+              report();
+            },
+            streetListP,
           );
           if (res.notConfigured) {
             toast.warning("Fotos de calle no configuradas: define MAPILLARY_TOKEN en el servidor. Se usan los colores estándar.");
@@ -275,11 +298,15 @@ export const useStudio = create<StudioState>((set, get) => ({
           }
         } catch (e) {
           console.warn("[generate] fotos de calle fallaron", e);
+        } finally {
+          streetFrac = 1;
+          report();
         }
-      }
-      if (get().aiBuildings) {
+      };
+
+      const aiTask = async () => {
+        if (!get().aiBuildings) return;
         try {
-          set({ progress: 40, progressLabel: "IA: preparando imagen aérea…" });
           const st = get();
           const sat = await getCityAssets(box, {
             satellite: true,
@@ -290,8 +317,10 @@ export const useStudio = create<StudioState>((set, get) => ({
             toast.warning("IA propia: no se pudo descargar la imagen aérea. Se usan los datos estándar.");
           } else {
             const res = await enrichBuildingsWithAI(data, sat, {
-              onProgress: (done, total) =>
-                set({ progress: 40 + Math.round((done / Math.max(1, total)) * 5), progressLabel: `IA: analizando edificios ${done}/${total}…` }),
+              onProgress: (done, total) => {
+                aiFrac = done / Math.max(1, total);
+                report();
+              },
             });
             if (res.noModel) {
               toast.warning("IA propia: no hay modelo en /models (building-net.onnx). Entrénalo con ml/ y cópialo. Se usan los datos estándar.");
@@ -302,8 +331,13 @@ export const useStudio = create<StudioState>((set, get) => ({
         } catch (e) {
           console.warn("[generate] IA de edificios falló", e);
           toast.warning("IA propia falló; se usan los datos estándar.");
+        } finally {
+          aiFrac = 1;
+          report();
         }
-      }
+      };
+
+      await Promise.all([landDone, streetTask(), aiTask()]);
       set({
         city: data,
         status: "meshing",

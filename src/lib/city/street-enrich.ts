@@ -3,6 +3,7 @@
  * Solo completa edificios sin color de fachada conocido (b.facade).
  */
 import { fetchStreetThumbsFn, listStreetImagesFn } from "./mapillary";
+import type { BBox } from "./types";
 import { project } from "./geo";
 import { colorFromCrop } from "./street-color";
 import { loadFacadeNet, predictFacadeMaterials, resizeCropRGB, writeTensor } from "./facade-net";
@@ -41,11 +42,19 @@ async function decode(b64: string): Promise<{ data: Uint8ClampedArray; w: number
   }
 }
 
+/** Lista de fotos de calle del bbox. Se puede lanzar antes de tener los edificios (solo depende del bbox). */
+export function prefetchStreetList(bbox: BBox) {
+  return listStreetImagesFn({ data: bbox }).catch(
+    (e) => ({ ok: false as const, reason: "failed" as const, message: e instanceof Error ? e.message : String(e) }),
+  );
+}
+
 export async function enrichFacadeColorsFromStreet(
   data: CityData,
   onProgress?: (done: number, total: number) => void,
+  prefetched?: ReturnType<typeof prefetchStreetList>,
 ): Promise<StreetResult> {
-  const list = await listStreetImagesFn({ data: data.bbox });
+  const list = await (prefetched ?? prefetchStreetList(data.bbox));
   if (!list.ok) {
     return { applied: 0, candidates: 0, notConfigured: list.reason === "not_configured", warning: list.message };
   }
