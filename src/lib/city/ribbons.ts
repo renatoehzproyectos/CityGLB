@@ -27,7 +27,6 @@ export function buildRibbons(
 ): RibbonResult | null {
   if (!profiles.length) return null;
   const pos: number[] = [], uv: number[] = [], idx: number[] = [];
-  const spos: number[] = [], sidx: number[] = [];
   const spanX = extent.maxX - extent.minX || 1, spanZ = extent.maxZ - extent.minZ || 1;
   const U = (x: number) => (x - extent.minX) / spanX;
   const Vv = (z: number) => 1 - (z - extent.minZ) / spanZ;
@@ -50,7 +49,6 @@ export function buildRibbons(
     const n = pr.pts.length;
     const half = pr.width / 2 + 0.3; // un poco más ancha que la vía (desfase foto/mapa)
     const base = pos.length / 3;
-    const sbase = spos.length / 3;
     for (let i = 0; i < n; i++) {
       const a = pr.pts[Math.max(0, i - 1)], b = pr.pts[Math.min(n - 1, i + 1)];
       const dx = b[0] - a[0], dz = b[1] - a[1], l = Math.hypot(dx, dz) || 1;
@@ -60,18 +58,38 @@ export function buildRibbons(
         const ex = x + nx * half * sd, ez = z + nz * half * sd;
         pos.push(ex, y, ez);
         uv.push(U(ex), Vv(ez));
-        // faldón: del borde de la cinta hasta el suelo real (mín. 0.4 m) para no dejar aire en rellenos
-        const bot = Math.min(y - 0.4, (groundAt ? groundAt(ex, ez) : y - 1.6) - 0.3);
-        spos.push(ex, y, ez, ex, bot, ez);
       }
+    }
+    // Talud (relleno): desde el borde de la cinta baja en pendiente 1:1.5 hasta tocar el terreno. Lleva la MISMA foto
+    // del terreno (mismas UV), así que se ve como ladera y no como un muro. Cada fila: [borde, pie] × [izq, der].
+    const eb = pos.length / 3;
+    const ebN = groundAt ? n : 0;
+    for (let i = 0; i < ebN; i++) {
+      const a = pr.pts[Math.max(0, i - 1)], b = pr.pts[Math.min(n - 1, i + 1)];
+      const dx = b[0] - a[0], dz = b[1] - a[1], l = Math.hypot(dx, dz) || 1;
+      const nx = -dz / l, nz = dx / l;
+      const [x, z] = pr.pts[i], y = pr.y[i];
+      for (const sd of [-1, 1]) {
+        const ex = x + nx * half * sd, ez = z + nz * half * sd;
+        let tEnd = 0;
+        for (let t = 0.6; t <= 24; t += 0.6) {
+          tEnd = t;
+          if (groundAt!(ex + nx * sd * t, ez + nz * sd * t) >= y - t * 0.67) break;
+        }
+        const fx = ex + nx * sd * tEnd, fz = ez + nz * sd * tEnd;
+        const fy = Math.min(y - tEnd * 0.67, groundAt!(fx, fz)) ;
+        pos.push(ex, y - 0.02, ez, fx, Math.max(fy, y - tEnd * 0.67 - 0.5), fz);
+        uv.push(U(ex), Vv(ez), U(fx), Vv(fz));
+      }
+    }
+    for (let i = 0; i < ebN - 1; i++) {
+      const a = eb + i * 4, c = a + 4; // [L borde, L pie, R borde, R pie]
+      idx.push(a, a + 1, c, c, a + 1, c + 1);
+      idx.push(a + 2, c + 2, a + 3, c + 2, c + 3, a + 3);
     }
     for (let i = 0; i < n - 1; i++) {
       const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3;
       idx.push(a, c, b, b, c, d);
-      const sa = sbase + i * 4; // [L top, L bot, R top, R bot] por muestra
-      const sc = sa + 4;
-      sidx.push(sa, sa + 1, sc, sc, sa + 1, sc + 1); // faldón izquierdo
-      sidx.push(sa + 2, sc + 2, sa + 3, sc + 2, sc + 3, sa + 3); // faldón derecho
       put({ ax: pr.pts[i][0], az: pr.pts[i][1], ay: pr.y[i], bx: pr.pts[i + 1][0], bz: pr.pts[i + 1][1], by: pr.y[i + 1], half: pr.width / 2 + 0.3 });
     }
     count++;
@@ -83,9 +101,6 @@ export function buildRibbons(
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  // normales hacia el cielo (el orden de los vértices depende del sentido de cada vía)
-  const nrm = geo.getAttribute("normal") as THREE.BufferAttribute;
-  for (let i = 0; i < nrm.count; i++) if (nrm.getY(i) < 0) nrm.setXYZ(i, -nrm.getX(i), -nrm.getY(i), -nrm.getZ(i));
   // el sentido de giro de los triángulos también varía: material de doble cara
   const mat = (terrainMat as THREE.MeshStandardMaterial).clone();
   mat.side = THREE.DoubleSide;
@@ -102,16 +117,9 @@ export function buildRibbons(
     }
   };
 
-  const sgeo = new THREE.BufferGeometry();
-  sgeo.setAttribute("position", new THREE.Float32BufferAttribute(spos, 3));
-  sgeo.setIndex(sidx);
-  sgeo.computeVertexNormals();
-  const skirt = new THREE.Mesh(sgeo, new THREE.MeshStandardMaterial({ color: 0x4a4034, roughness: 1, side: THREE.DoubleSide }));
-  skirt.name = "road_skirts";
-
   const group = new THREE.Group();
   group.name = "road_ribbons";
-  group.add(skirt, mesh);
+  group.add(mesh);
 
   const ribbonAt = (x: number, z: number): number | null => {
     const list = index.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`);

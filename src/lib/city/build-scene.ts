@@ -858,7 +858,7 @@ export async function buildCityMeshes(
   if (tunnelPlans.length) {
     try {
       onProgress?.(0.93, "Building tunnels…");
-      const t = buildTunnels(tunnelPlans);
+      const t = buildTunnels(tunnelPlans, { groundAt, extent: data.extent, terrainMat });
       if (t) {
         tunnelsObj = t.group;
         tunnelFloorAt = t.floorAt;

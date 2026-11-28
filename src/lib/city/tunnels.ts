@@ -184,10 +184,25 @@ export function openCutRoads(plans: TunnelPlan[]): RoadFeature[] {
 type V = [number, number, number];
 type C = [number, number, number];
 
-export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
+export type TunnelCtx = {
+  groundAt?: ((x: number, z: number) => number) | null;
+  extent?: { minX: number; maxX: number; minZ: number; maxZ: number };
+  terrainMat?: THREE.Material;
+};
+
+export function buildTunnels(plans: TunnelPlan[], ctx: TunnelCtx = {}): TunnelResult | null {
   if (!plans.length) return null;
   const lit = { pos: [] as number[], col: [] as number[] };
   const bak = { pos: [] as number[], col: [] as number[] };
+  // taludes de corte de las trincheras: misma foto del terreno (UV) para que se vean como ladera
+  const slp = { pos: [] as number[], uv: [] as number[], idx: [] as number[] };
+  const ex = ctx.extent, gAt = ctx.groundAt;
+  const spX = ex ? ex.maxX - ex.minX || 1 : 1, spZ = ex ? ex.maxZ - ex.minZ || 1 : 1;
+  const slopeVert = (x: number, y: number, z: number) => {
+    slp.pos.push(x, y, z);
+    slp.uv.push(ex ? (x - ex.minX) / spX : 0, ex ? 1 - (z - ex.minZ) / spZ : 0);
+    return slp.pos.length / 3 - 1;
+  };
   const tri = (b: typeof lit, a: V, c: V, d: V, ca: C, cc: C, cd: C) => { b.pos.push(...a, ...c, ...d); b.col.push(...ca, ...cc, ...cd); };
   const quad = (b: typeof lit, a: V, c: V, d: V, e: V, k: C, la = 1, lc = 1, ld = 1, le = 1) => {
     const m = (l: number): C => [k[0] * l, k[1] * l, k[2] * l];
@@ -306,12 +321,23 @@ export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
         const floorCol2 = floorCol;
         quad(lit, at(i, -half, 0), at(i, half, 0), at(j, half, 0), at(j, -half, 0), floorCol2);
         markings(lit, i, j, false);
+        // taludes de corte: del borde de la solera suben 1:1 hasta tocar el terreno natural
         for (const sd of [-1, 1]) {
-          // muro de contención vertical hasta el terreno natural (+ remate), cara interior y exterior
-          const di = Math.max(0.2, g[i] + 0.2 - f[i]), dj = Math.max(0.2, g[j] + 0.2 - f[j]);
-          quad(lit, at(i, sd * half, 0), at(j, sd * half, 0), at(j, sd * half, dj), at(i, sd * half, di), CONC);
-          quad(lit, at(i, sd * (half + 0.45), 0), at(i, sd * (half + 0.45), di), at(j, sd * (half + 0.45), dj), at(j, sd * (half + 0.45), 0), CONC);
-          quad(lit, at(i, sd * half, di), at(j, sd * half, dj), at(j, sd * (half + 0.45), dj), at(i, sd * (half + 0.45), di), CONC);
+          const ends: [number, number, number][] = [];
+          for (const k of [i, j]) {
+            const lx = P[k][0] - tz[k] * (half + 0.05) * sd, lz = P[k][1] + tx[k] * (half + 0.05) * sd;
+            const nxk = -tz[k] * sd, nzk = tx[k] * sd;
+            let tEnd = 0.8;
+            if (gAt) {
+              for (let t = 0.8; t <= 26; t += 0.8) { tEnd = t; if (gAt(lx + nxk * t, lz + nzk * t) >= f[k] + t * 1.0) break; }
+            }
+            ends.push([lx + nxk * tEnd, f[k] + tEnd, lz + nzk * tEnd]);
+          }
+          const e0 = slopeVert(P[i][0] - tz[i] * (half + 0.05) * sd, f[i], P[i][1] + tx[i] * (half + 0.05) * sd);
+          const e1 = slopeVert(ends[0][0], ends[0][1], ends[0][2]);
+          const e2 = slopeVert(P[j][0] - tz[j] * (half + 0.05) * sd, f[j], P[j][1] + tx[j] * (half + 0.05) * sd);
+          const e3 = slopeVert(ends[1][0], ends[1][1], ends[1][2]);
+          slp.idx.push(e0, e1, e2, e2, e1, e3);
         }
         put({ ax: P[i][0], az: P[i][1], ay: f[i], bx: P[j][0], bz: P[j][1], by: f[j], half });
       }
@@ -372,8 +398,30 @@ export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
   if (litMesh) { litMesh.castShadow = false; litMesh.receiveShadow = true; }
   // interior: SIN iluminación del sol (está bajo el cerro); la luz está horneada en los colores de vértice
   const bakMesh = mk(bak, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), "tunnels_interior");
+  let slopeMesh: THREE.Mesh | null = null;
+  if (slp.idx.length && ctx.terrainMat) {
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute("position", new THREE.Float32BufferAttribute(slp.pos, 3));
+    sg.setAttribute("uv", new THREE.Float32BufferAttribute(slp.uv, 2));
+    sg.setIndex(slp.idx);
+    sg.computeVertexNormals();
+    const sm = (ctx.terrainMat as THREE.MeshStandardMaterial).clone();
+    sm.side = THREE.DoubleSide;
+    slopeMesh = new THREE.Mesh(sg, sm);
+    slopeMesh.name = "tunnel_cuts";
+    slopeMesh.receiveShadow = true;
+    slopeMesh.onBeforeRender = () => {
+      const t = ctx.terrainMat as THREE.MeshStandardMaterial;
+      if (sm.map !== t.map) {
+        sm.map = t.map; sm.emissiveMap = t.emissiveMap; sm.color.copy(t.color);
+        sm.emissive.copy(t.emissive); sm.emissiveIntensity = t.emissiveIntensity;
+        sm.roughness = t.roughness; sm.metalness = t.metalness; sm.needsUpdate = true;
+      }
+    };
+  }
   const group = new THREE.Group();
   group.name = "tunnels";
+  if (slopeMesh) group.add(slopeMesh);
   if (litMesh) group.add(litMesh);
   if (bakMesh) group.add(bakMesh);
   if (!group.children.length) return null;
