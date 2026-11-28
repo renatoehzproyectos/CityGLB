@@ -130,7 +130,9 @@ function distToRing(x: number, z: number, ring: [number, number][]): number {
 
 export type FlattenStats = { cells: number; flatCells: number; pads: number; roadsLeveled: number; spacing: number };
 
-export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightGrid; stats: FlattenStats } {
+export type RoadProfile = { pts: [number, number][]; y: number[]; width: number; cls: string };
+
+export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightGrid; stats: FlattenStats; profiles: RoadProfile[] } {
   const g = densify(src);
   const { width: w, height: h, xs, zs } = g;
   const n = w * h;
@@ -191,31 +193,37 @@ export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightG
     pads++;
   }
 
-  // 4) Nivelación de calzadas: la sección transversal queda PLANA (sin "roll"); el perfil longitudinal sigue el
-  //    terreno suavizado. En ladera: corte en el lado alto y relleno en el bajo, con talud suave hacia el terreno.
-  let roadsLeveled = 0;
+  // 4) Perfil de cada calzada + "cono de influencia" sobre la malla. La calzada en sí se dibuja aparte como una CINTA
+  //    plana (ribbons.ts) a la altura del perfil: así queda exactamente nivelada de lado a lado aunque la malla del
+  //    terreno sea gruesa. Aquí solo se baja/sube la malla para que no tape la cinta ni deje huecos:
+  //    - dentro de (semiancho + ~1.5 celdas) la malla nunca queda por encima de 0.25 m bajo la cinta (corte);
+  //    - fuera, la malla no puede subir más de 0.9 m por metro de distancia sobre ese nivel (talud de corte).
+  const profiles: RoadProfile[] = [];
   const G = blur(g.data, w, h, 1, 1); // terreno casi crudo (sin erosión) para leer el perfil
-  const num = new Float32Array(n), den = new Float32Array(n), wmax = new Float32Array(n);
   const gG: HeightGrid = { ...g, data: G };
   const hAt = (x: number, z: number) => bilinear(gG, x, -z);
+  let totalLen = 0;
   for (const r of data.roads ?? []) {
-    if (r.bridge || r.tunnel || r.width < 3.5 || r.cls === "rail") continue; // puentes/túneles: fases 3-4; sendas: siguen el relieve
+    if (r.bridge || r.tunnel || r.width < 3 || r.cls === "rail") continue;
+    for (let k = 0; k < r.pts.length - 1; k++) totalLen += Math.hypot(r.pts[k + 1][0] - r.pts[k][0], r.pts[k + 1][1] - r.pts[k][1]);
+  }
+  const baseStep = Math.max(sp, 2.5, totalLen / 60000); // tope ≈ 60k muestras de calzada
+  for (const r of data.roads ?? []) {
+    if (r.bridge || r.tunnel || r.width < 3 || r.cls === "rail") continue; // puentes/túneles: fases 3-4
     const half = r.width / 2;
-    const step = Math.max(sp, 2);
-    // remuestreo del eje
     const S: [number, number][] = [];
-    let next = 0; // distancia, dentro del tramo actual, donde va la próxima muestra
+    let next = 0;
     for (let k = 0; k < r.pts.length - 1; k++) {
       const [ax, az] = r.pts[k], [bx, bz] = r.pts[k + 1];
       const L = Math.hypot(bx - ax, bz - az);
-      while (next < L) { S.push([ax + ((bx - ax) * next) / L, az + ((bz - az) * next) / L]); next += step; }
+      while (next < L) { S.push([ax + ((bx - ax) * next) / L, az + ((bz - az) * next) / L]); next += baseStep; }
       next -= L;
     }
     S.push(r.pts[r.pts.length - 1]);
     if (S.length < 2) continue;
     // perfil: altura en el eje, suavizada a lo largo de la vía (quita ruido de edificios/copas)
-    let p = S.map(([x, z]) => hAt(x, z));
-    const win = Math.max(2, Math.round(24 / step));
+    const p = S.map(([x, z]) => hAt(x, z));
+    const win = Math.max(2, Math.round(24 / baseStep));
     for (let pass = 0; pass < 3; pass++) {
       const q = p.slice();
       for (let i = 0; i < p.length; i++) {
@@ -224,31 +232,26 @@ export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightG
         p[i] = sum / c;
       }
     }
-    const full = half + 1.2; // semiancho plano (con holgura por el desfase foto/mapa)
-    const shoulder = Math.min(14, Math.max(3, sp * 1.2)); // talud hacia el terreno natural
-    const reach = full + shoulder;
-    for (let k = 0; k < S.length - 1; k++) {
-      const [ax, az] = S[k], [bx, bz] = S[k + 1];
-      const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
-      cellsIn(Math.min(ax, bx) - reach, Math.max(ax, bx) + reach, Math.min(az, bz) - reach, Math.max(az, bz) + reach, (i, j, x, z) => {
-        const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
-        const d = Math.hypot(x - (ax + dx * t), z - (az + dz * t));
-        if (d >= reach) return;
-        const u = d <= full ? 1 : 1 - (d - full) / shoulder;
-        const wt = u * u * (3 - 2 * u);
-        const ph = p[k] + (p[k + 1] - p[k]) * t;
+    profiles.push({ pts: S, y: p, width: r.width, cls: r.cls });
+    // los triángulos que cubren el borde de la cinta tienen vértices hasta ~1.41 celdas lejos: todos deben quedar bajo ella
+    const hard = half + 1.45 * sp + 0.3;
+    const reach = hard + 30;
+    for (let k = 0; k < S.length; k++) {
+      const [x, z] = S[k];
+      const lvl = p[k] - 0.25;
+      cellsIn(x - reach, x + reach, z - reach, z + reach, (i, j, cx, cz) => {
+        const d = Math.hypot(cx - x, cz - z);
+        if (d > reach) return;
+        const slack = d <= hard ? 0 : 0.9 * (d - hard);
         const c = j * w + i;
-        num[c] += wt * ph; den[c] += wt;
-        if (wt > wmax[c]) wmax[c] = wt;
+        const v = out[c];
+        // SOLO se baja (corte); el relleno no se levanta: los faldones de la cinta bajan hasta el suelo real
+        if (v > lvl + slack) out[c] = lvl + slack;
       });
     }
-    roadsLeveled++;
-  }
-  for (let c = 0; c < n; c++) {
-    if (wmax[c] > 0 && den[c] > 0) out[c] = out[c] * (1 - wmax[c]) + (num[c] / den[c]) * wmax[c];
   }
 
   let minH = Infinity, maxH = -Infinity;
   for (let i = 0; i < n; i++) { if (out[i] < minH) minH = out[i]; if (out[i] > maxH) maxH = out[i]; }
-  return { grid: { ...g, data: out, minH, maxH }, stats: { cells: n, flatCells, pads, roadsLeveled, spacing: sp } };
+  return { grid: { ...g, data: out, minH, maxH }, stats: { cells: n, flatCells, pads, roadsLeveled: profiles.length, spacing: sp }, profiles };
 }

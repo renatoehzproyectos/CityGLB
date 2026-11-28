@@ -343,7 +343,11 @@ export function CityViewer({
         // Start vehicle
         vehicleRef.current?.dispose();
         const mode = playModeRef.current as "car" | "plane";
-        const vehicle = createVehicleController(mode, city, meshes.heightGrid, scene, meshes.surfacesAt);
+        const vehicle = createVehicleController(mode, city, meshes.heightGrid, scene, {
+          surfacesAt: meshes.surfacesAt,
+          tunnelQuery: meshes.tunnelAt,
+          ribbonAt: meshes.ribbonAt,
+        });
         const y = mode === "car" ? p.y + 0.5 : p.y + 12;
         vehicle.spawnAt(p.x, y, p.z, 0);
         vehicleRef.current = vehicle;
@@ -391,7 +395,7 @@ export function CityViewer({
         const mode = playModeRef.current;
         if (mode !== "orbit" && phaseRef.current === "drive" && vehicleRef.current) {
           vehicleRef.current.update(dt, inputRef.current);
-          updateFollowCamera(camera, vehicleRef.current.group, mode, dt);
+          updateFollowCamera(camera, vehicleRef.current.group, mode, dt, meshes.tunnelAt);
         } else {
           orbit.update();
         }

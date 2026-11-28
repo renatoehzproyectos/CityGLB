@@ -6,6 +6,7 @@
 import * as THREE from "three";
 import type { BuildingFeature, CityData } from "./types";
 import type { HeightGrid } from "./elevation";
+import type { TunnelHit } from "./tunnels";
 import { sampleHeight } from "./elevation";
 
 export type PlayMode = "orbit" | "car" | "plane";
@@ -127,13 +128,23 @@ function makePlaneMesh(): THREE.Group {
   return g;
 }
 
+/** Superficies extra sobre el terreno: puentes/túneles/calzadas niveladas. */
+export type VehicleExtras = {
+  surfacesAt?: (x: number, z: number) => number[];
+  tunnelQuery?: (x: number, z: number, y: number) => TunnelHit | null;
+  ribbonAt?: (x: number, z: number) => number | null;
+};
+
 export function createVehicleController(
   mode: "car" | "plane",
   city: CityData,
   heightGrid: HeightGrid | null | undefined,
   scene: THREE.Scene,
-  surfacesAt?: (x: number, z: number) => number[],
+  ext?: VehicleExtras,
 ): VehicleController {
+  const surfacesAt = ext?.surfacesAt;
+  const tunnelQuery = ext?.tunnelQuery;
+  const ribbonAt = ext?.ribbonAt;
   const group = mode === "car" ? makeCarMesh() : makePlaneMesh();
   group.name = mode === "car" ? "player-car" : "player-plane";
   scene.add(group);
@@ -207,7 +218,22 @@ export function createVehicleController(
     pos.x += Math.sin(yaw) * speed * dt;
     pos.z += Math.cos(yaw) * speed * dt;
 
+    // dentro de un túnel: las paredes son sólidas (el auto no sale al cerro ni se "teletransporta")
+    const th = tunnelQuery?.(pos.x, pos.z, pos.y);
+    if (th) {
+      const lim = th.half - 1.15; // semiancho útil del auto
+      if (Math.abs(th.d) > lim) {
+        const sgn = Math.sign(th.d) || 1;
+        pos.x = th.px + th.nx * lim * sgn;
+        pos.z = th.pz + th.nz * lim * sgn;
+        speed *= Math.max(0, 1 - 2.2 * dt); // roce con la pared
+      }
+    }
+
     let ground = groundY(heightGrid, pos.x, pos.z);
+    // calzada nivelada (cinta): el auto circula sobre ella, no sobre la malla (que queda ~0.25 m más abajo)
+    const rb = ribbonAt?.(pos.x, pos.z);
+    if (rb != null && rb > ground) ground = rb;
     // puentes y túneles: se elige la superficie más cercana a la altura actual (si está al alcance, < 2.5 m);
     // así no se salta al tablero estando debajo de él, ni a la superficie del cerro estando dentro del túnel
     for (const c of surfacesAt?.(pos.x, pos.z) ?? []) {
@@ -312,21 +338,42 @@ export function createVehicleController(
   };
 }
 
-/** Follow camera behind vehicle */
+/** Follow camera behind vehicle (dentro de un túnel se acerca y baja para quedar bajo la bóveda) */
 export function updateFollowCamera(
   camera: THREE.PerspectiveCamera,
   vehicle: THREE.Object3D,
   mode: "car" | "plane",
   dt: number,
+  tunnelQuery?: (x: number, z: number, y: number) => TunnelHit | null,
 ) {
-  const behind = mode === "car" ? 12 : 18;
-  const height = mode === "car" ? 5.5 : 7;
+  let behind = mode === "car" ? 12 : 18;
+  let height = mode === "car" ? 5.5 : 7;
   const yaw = vehicle.rotation.y;
+  const inTunnel = mode === "car" ? tunnelQuery?.(vehicle.position.x, vehicle.position.z, vehicle.position.y) : null;
+  if (inTunnel) {
+    // altura libre sobre el auto: cámara siempre por debajo de la bóveda
+    const room = inTunnel.ceil - vehicle.position.y;
+    height = Math.max(1.6, Math.min(height, room - 0.9));
+    behind = Math.min(behind, 7.5);
+  }
   const target = new THREE.Vector3(
     vehicle.position.x - Math.sin(yaw) * behind,
     vehicle.position.y + height,
     vehicle.position.z - Math.cos(yaw) * behind,
   );
-  camera.position.lerp(target, 1 - Math.pow(0.001, dt));
+  if (inTunnel) {
+    // si el punto cae fuera de las paredes (curvas), se mete dentro; y bajo la bóveda
+    const ch = tunnelQuery!(target.x, target.z, vehicle.position.y);
+    if (ch) {
+      const lim = ch.half - 0.7;
+      if (Math.abs(ch.d) > lim) {
+        const sgn = Math.sign(ch.d) || 1;
+        target.x = ch.px + ch.nx * lim * sgn;
+        target.z = ch.pz + ch.nz * lim * sgn;
+      }
+      target.y = Math.min(target.y, ch.ceil - 0.5);
+    }
+  }
+  camera.position.lerp(target, 1 - Math.pow(inTunnel ? 0.0001 : 0.001, dt));
   camera.lookAt(vehicle.position.x, vehicle.position.y + 1.2, vehicle.position.z);
 }

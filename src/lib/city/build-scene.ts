@@ -10,9 +10,10 @@ import { getCityAssets } from "./prefetch";
 import { MATERIAL_TINT, createFacadeMaterial } from "./facade-materials";
 import { buildWaterMesh } from "./water";
 import { analyzeVegetation } from "./vegetation";
-import { flattenTerrain } from "./flatten";
+import { flattenTerrain, type RoadProfile } from "./flatten";
+import { buildRibbons } from "./ribbons";
 import { buildBridges, collectBridges } from "./bridges";
-import { buildTunnels, openCutRoads, planTunnels, type TunnelPlan } from "./tunnels";
+import { buildTunnels, openCutRoads, planTunnels, type TunnelPlan, type TunnelHit } from "./tunnels";
 import { buildVegetation } from "./vegetation-gl";
 import type { SeaMaterial, WaterConfig } from "./water-material";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
@@ -613,6 +614,12 @@ export type CityMeshes = {
   tunnels?: THREE.Object3D;
   /** Cotas por las que puede circular un vehículo en (x,z): tablero de puente y/o solera de túnel. */
   surfacesAt?: (x: number, z: number) => number[];
+  /** Consulta de túnel cubierto (colisión con paredes y cámara). */
+  tunnelAt?: (x: number, z: number, y: number) => TunnelHit | null;
+  /** Calzadas niveladas (cintas planas). */
+  roads?: THREE.Object3D;
+  /** Altura de la calzada nivelada (cinta) en (x,z), o null. */
+  ribbonAt?: (x: number, z: number) => number | null;
   /** Avanza animaciones (olas, viento). Llamar cada fotograma con el tiempo en segundos. */
   update?: (timeSec: number) => void;
   /** Pasa al agua el sol y el cielo de la escena para sus reflejos. */
@@ -659,12 +666,14 @@ export async function buildCityMeshes(
   onProgress?.(0.1, "Loading terrain data…");
 
   const rawGrid = await elevPromise;
+  let roadProfiles: RoadProfile[] = [];
   let gridW = rawGrid; // se reasigna (aplanado, túneles); luego se congela en `grid`
   if (rawGrid && cfg.FLATTEN_URBAN) {
     try {
       onProgress?.(0.3, "Flattening urban terrain…");
       const f = flattenTerrain(rawGrid, data);
       gridW = f.grid;
+      roadProfiles = f.profiles;
       console.info("[flatten]", f.stats);
     } catch (e) {
       console.warn("Flatten failed; using raw terrain", e);
@@ -805,6 +814,25 @@ export async function buildCityMeshes(
       console.warn("Water failed", e);
     }
   }
+  let ribbonsObj: THREE.Object3D | undefined;
+  let ribbonAtFn: ((x: number, z: number) => number | null) | undefined;
+  if (roadProfiles.length) {
+    try {
+      onProgress?.(0.9, "Leveling roads…");
+      const rb = buildRibbons(roadProfiles, data.extent, terrainMat, groundAt);
+      if (rb) {
+        ribbonsObj = rb.group;
+        ribbonAtFn = rb.ribbonAt;
+        group.add(rb.group);
+        rb.group.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (m.isMesh) vertices += m.geometry.getAttribute("position").count;
+        });
+      }
+    } catch (e) {
+      console.warn("Road ribbons failed", e);
+    }
+  }
   let bridgesObj: THREE.Object3D | undefined;
   let deckAt: ((x: number, z: number) => number | null) | undefined;
   let bridgeCount = 0;
@@ -825,6 +853,7 @@ export async function buildCityMeshes(
   }
   let tunnelsObj: THREE.Object3D | undefined;
   let tunnelFloorAt: ((x: number, z: number) => number | null) | undefined;
+  let tunnelQuery: ((x: number, z: number, y: number) => TunnelHit | null) | undefined;
   let tunnelCount = 0;
   if (tunnelPlans.length) {
     try {
@@ -833,6 +862,7 @@ export async function buildCityMeshes(
       if (t) {
         tunnelsObj = t.group;
         tunnelFloorAt = t.floorAt;
+        tunnelQuery = t.query;
         tunnelCount = t.count;
         group.add(t.group);
         t.group.traverse((o) => {
@@ -893,6 +923,9 @@ export async function buildCityMeshes(
     bridges: bridgesObj,
     deckAt,
     tunnels: tunnelsObj,
+    tunnelAt: tunnelQuery,
+    ribbonAt: ribbonAtFn,
+    roads: ribbonsObj,
     surfacesAt: (x, z) => {
       const out: number[] = [];
       const d = deckAt?.(x, z);

@@ -23,7 +23,16 @@ export type TunnelPlan = {
   tx: number[]; tz: number[];
   half: number; H: number; kind: TunnelKind; total: number; step: number;
 };
-export type TunnelResult = { group: THREE.Group; count: number; floorAt: (x: number, z: number) => number | null; lamps: number };
+export type TunnelHit = {
+  floor: number; ceil: number; half: number;
+  /** distancia lateral con signo al eje y normal unitaria (xz) del eje en el punto más cercano */
+  d: number; nx: number; nz: number; px: number; pz: number;
+};
+export type TunnelResult = {
+  group: THREE.Group; count: number; floorAt: (x: number, z: number) => number | null; lamps: number;
+  /** Consulta en (x,z,y): tramo CUBIERTO cuya solera está a menos de ~3 m de y; null si no hay. */
+  query: (x: number, z: number, y: number) => TunnelHit | null;
+};
 
 const ROOF = 0.8, COVER_MIN = 0.5, COVER_EXTRA = 0.6;
 const kindOf = (cls: string, width: number): TunnelKind => (cls === "rail" ? "rail" : width < 3.5 ? "ped" : "road");
@@ -103,36 +112,53 @@ export function planTunnels(data: CityData, grid: HeightGrid, maxTunnels = 60): 
       const cp = f.slice();
       for (let i = 1; i < n - 1; i++) f[i] = (cp[i - 1] + 2 * cp[i] + cp[i + 1]) / 4;
     }
-    const open = f.map((fi, i) => g[i] - (fi + H + ROOF) < COVER_MIN);
-    // tramos cubiertos de menos de ~8 m no valen la pena: trinchera
-    for (let i = 0; i < n; ) {
-      if (open[i]) { i++; continue; }
-      let e = i;
-      while (e + 1 < n && !open[e + 1]) e++;
-      if (s[e] - s[i] < 8) for (let k = i; k <= e; k++) open[k] = true;
-      i = e + 1;
+    // cubierto con histéresis: para PASAR a cubierto se exige cobertura >= COVER_MIN; una vez cubierto, se sigue así
+    // mientras quede >= 0 (evita parpadeo abierto/cubierto, que generaba varios portales seguidos)
+    const open: boolean[] = new Array(n).fill(true);
+    {
+      const cov = (i: number) => g[i] - (f[i] + H + ROOF);
+      let state = false;
+      for (let i = 0; i < n; i++) {
+        state = state ? cov(i) >= 0 : cov(i) >= COVER_MIN;
+        open[i] = !state;
+      }
     }
+    const runs = (val: boolean) => {
+      const out: [number, number][] = [];
+      for (let i = 0; i < n; ) {
+        if (open[i] !== val) { i++; continue; }
+        let e = i;
+        while (e + 1 < n && open[e + 1] === val) e++;
+        out.push([i, e]);
+        i = e + 1;
+      }
+      return out;
+    };
+    // huecos abiertos cortos entre dos tramos cubiertos (< 14 m): se cubren; tramos cubiertos cortos (< 10 m): se abren
+    for (const [a, b] of runs(true)) if (a > 0 && b < n - 1 && s[b] - s[a] < 14) for (let k = a; k <= b; k++) open[k] = false;
+    for (const [a, b] of runs(false)) if (s[b] - s[a] < 10) for (let k = a; k <= b; k++) open[k] = true;
     plans.push({ P, f, g, open, s, tx, tz, half, H, kind, total: tot, step });
   }
 
-  // tallar el terreno en las trincheras
+  // tallar el terreno en las trincheras: la calzada y ~1/3 de celda a cada lado quedan por debajo de la solera;
+  // más afuera la transición es suave. Así el terreno no tapa el camino y no quedan muros sueltos.
   const w = grid.width, h = grid.height;
   const hd = Float32Array.from(grid.data);
   const dx = (grid.xs[w - 1] - grid.xs[0]) / (w - 1), dz = (grid.zs[h - 1] - grid.zs[0]) / (h - 1);
+  const cellM = Math.max(Math.abs(dx), Math.abs(dz));
   for (const pl of plans) {
     for (let i = 0; i < pl.P.length; i++) {
       if (!pl.open[i]) continue;
       const [x, z] = pl.P[i];
-      const depth = Math.max(0, pl.g[i] + 0.1 - pl.f[i]);
-      const reach = pl.half + 0.6 * depth + 0.6 * Math.max(Math.abs(dx), Math.abs(dz));
+      const hard = pl.half + 0.35 * cellM, reach = pl.half + 0.9 * cellM;
       const ci = Math.round((x - grid.xs[0]) / dx), cj = Math.round((-z - grid.zs[0]) / dz);
       const ri = Math.ceil(reach / Math.abs(dx)) + 1, rj = Math.ceil(reach / Math.abs(dz)) + 1;
       for (let j = Math.max(0, cj - rj); j <= Math.min(h - 1, cj + rj); j++) {
         for (let k = Math.max(0, ci - ri); k <= Math.min(w - 1, ci + ri); k++) {
           const d = Math.hypot(grid.xs[k] - x, -grid.zs[j] - z);
           if (d > reach) continue;
-          const wt = d <= pl.half ? 1 : 1 - (d - pl.half) / (reach - pl.half);
-          const nh = hd[j * w + k] * (1 - wt) + (pl.f[i] - 0.4) * wt;
+          const wt = d <= hard ? 1 : 1 - (d - hard) / (reach - hard);
+          const nh = hd[j * w + k] * (1 - wt) + (pl.f[i] - 0.5) * wt;
           if (nh < hd[j * w + k]) hd[j * w + k] = nh;
         }
       }
@@ -188,6 +214,19 @@ export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
     }
   };
 
+  // índice de tramos cubiertos con su geometría de bóveda (para colisión y cámara)
+  type CSeg = Seg & { tx: number; tz: number; H: number; wallH: number };
+  const cidx = new Map<string, CSeg[]>();
+  const cput = (sg: CSeg) => {
+    const pad = sg.half + 2;
+    const i0 = Math.floor((Math.min(sg.ax, sg.bx) - pad) / CELL), i1 = Math.floor((Math.max(sg.ax, sg.bx) + pad) / CELL);
+    const j0 = Math.floor((Math.min(sg.az, sg.bz) - pad) / CELL), j1 = Math.floor((Math.max(sg.az, sg.bz) + pad) / CELL);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const k = `${i},${j}`;
+      const a = cidx.get(k);
+      if (a) a.push(sg); else cidx.set(k, [sg]);
+    }
+  };
   let lamps = 0;
   for (const pl of plans) {
     const { P, f, g, open, s, tx, tz, half, H, kind, step } = pl;
@@ -247,37 +286,50 @@ export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
           quad(bak, at(i, x0, y0), at(i, x1, y1), at(j, x1, y1), at(j, x0, y0), base, light[i] * mult, light[i] * mult, light[j] * mult, light[j] * mult);
         }
         markings(bak, i, j, true);
+        // cáscara exterior (hormigón iluminado) SOLO donde la bóveda asoma sobre el terreno
+        if (g[i] - (f[i] + H + ROOF) < 1.0 || g[j] - (f[j] + H + ROOF) < 1.0) {
+          const T = 0.6;
+          const outerPt = (x: number, y: number): [number, number] => {
+            if (y <= wallH + 1e-6) return [x + Math.sign(x) * T, y];
+            return [x * (1 + T / half), wallH + (y - wallH) * (1 + T / ry)];
+          };
+          for (let k = 1; k < prof.length - 2; k++) {
+            const [x0, y0] = prof[k], [x1, y1] = prof[k + 1];
+            const [ox0, oy0] = outerPt(x0, y0), [ox1, oy1] = outerPt(x1, y1);
+            quad(lit, at(i, ox0, oy0), at(j, ox0, oy0), at(j, ox1, oy1), at(i, ox1, oy1), CONC);
+          }
+        }
         put({ ax: P[i][0], az: P[i][1], ay: f[i], bx: P[j][0], bz: P[j][1], by: f[j], half });
+        cput({ ax: P[i][0], az: P[i][1], ay: f[i], bx: P[j][0], bz: P[j][1], by: f[j], half, tx: tx[i], tz: tz[i], H, wallH });
       } else {
         // ---- tramo ABIERTO (trinchera): solera + taludes, con material iluminado por el sol ----
         const floorCol2 = floorCol;
         quad(lit, at(i, -half, 0), at(i, half, 0), at(j, half, 0), at(j, -half, 0), floorCol2);
         markings(lit, i, j, false);
         for (const sd of [-1, 1]) {
-          const di = Math.max(0.3, g[i] + 0.1 - f[i]), dj = Math.max(0.3, g[j] + 0.1 - f[j]);
-          const oi = half + 0.6 * di, oj = half + 0.6 * dj;
-          quad(lit, at(i, sd * half, 0), at(j, sd * half, 0), at(j, sd * oj, dj), at(i, sd * oi, di), sd < 0 ? EARTH : EARTH);
-          // zócalo de hormigón (primer metro)
-          quad(lit, at(i, sd * half, 0), at(j, sd * half, 0), at(j, sd * (half + 0.6), 1), at(i, sd * (half + 0.6), 1), CONC);
+          // muro de contención vertical hasta el terreno natural (+ remate), cara interior y exterior
+          const di = Math.max(0.2, g[i] + 0.2 - f[i]), dj = Math.max(0.2, g[j] + 0.2 - f[j]);
+          quad(lit, at(i, sd * half, 0), at(j, sd * half, 0), at(j, sd * half, dj), at(i, sd * half, di), CONC);
+          quad(lit, at(i, sd * (half + 0.45), 0), at(i, sd * (half + 0.45), di), at(j, sd * (half + 0.45), dj), at(j, sd * (half + 0.45), 0), CONC);
+          quad(lit, at(i, sd * half, di), at(j, sd * half, dj), at(j, sd * (half + 0.45), dj), at(i, sd * (half + 0.45), di), CONC);
         }
         put({ ax: P[i][0], az: P[i][1], ay: f[i], bx: P[j][0], bz: P[j][1], by: f[j], half });
       }
     }
 
-    // portales: muro de cabecera donde el tramo cubierto empieza/termina
+    // portales: marco de hormigón en arco en cada extremo del tramo cubierto (un solo anillo, sin losas sueltas)
     const headwall = (i: number) => {
-      const ytop = Math.min(H + ROOF + 1.0, Math.max(H + ROOF + 0.3, g[i] + 0.3 - f[i]));
-      const ext = 1.3;
+      const FR = 1.1; // ancho del marco
+      const outerPt = (x: number, y: number): [number, number] => {
+        if (y <= wallH + 1e-6) return [x + Math.sign(x) * FR, y];
+        return [x * (1 + FR / half), wallH + (y - wallH) * (1 + FR / ry)];
+      };
       for (let k = 0; k < prof.length - 1; k++) {
         const [x0, y0] = prof[k], [x1, y1] = prof[k + 1];
-        const arch = y0 >= wallH && y1 >= wallH && !(Math.abs(x0) === half && Math.abs(x1) === half);
-        const outer = (x: number, y: number): [number, number] => (arch || (Math.abs(x) < half * 0.999) ? [x, ytop] : [x + Math.sign(x) * ext, y]);
-        const [ox0, oy0] = outer(x0, y0), [ox1, oy1] = outer(x1, y1);
         if (y0 === 0 && y1 === 0) continue;
+        const [ox0, oy0] = outerPt(x0, y0), [ox1, oy1] = outerPt(x1, y1);
         quad(lit, at(i, x0, y0), at(i, x1, y1), at(i, ox1, oy1), at(i, ox0, oy0), CONC);
       }
-      // esquinas superiores
-      for (const sd of [-1, 1]) quad(lit, at(i, sd * half, wallH), at(i, sd * (half + ext), wallH), at(i, sd * (half + ext), ytop), at(i, sd * half, ytop), CONC);
     };
     for (let i = 0; i < n; i++) {
       if (!open[i] && (i === 0 || open[i - 1] || i === n - 1 || open[i + 1])) headwall(i);
@@ -338,5 +390,27 @@ export function buildTunnels(plans: TunnelPlan[]): TunnelResult | null {
     }
     return best;
   };
-  return { group, count: plans.length, floorAt, lamps };
+  const query = (x: number, z: number, y: number): TunnelHit | null => {
+    const list = cidx.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`);
+    if (!list) return null;
+    let best: TunnelHit | null = null, bd = Infinity;
+    for (const sg of list) {
+      const dx = sg.bx - sg.ax, dz = sg.bz - sg.az, l2 = dx * dx + dz * dz;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - sg.ax) * dx + (z - sg.az) * dz) / l2)) : 0;
+      const px = sg.ax + dx * t, pz = sg.az + dz * t;
+      const nx = -sg.tz, nz = sg.tx; // normal lateral
+      const d = (x - px) * nx + (z - pz) * nz;
+      const fl = sg.ay + (sg.by - sg.ay) * t;
+      if (Math.abs(d) > sg.half + 0.6 || Math.abs(y - fl) > 3.2) continue;
+      const ad = Math.abs(d);
+      if (ad < bd) {
+        bd = ad;
+        const ry = sg.H - sg.wallH;
+        const arch = sg.wallH + ry * Math.sqrt(Math.max(0, 1 - Math.min(1, ad / sg.half) ** 2));
+        best = { floor: fl, ceil: fl + arch, half: sg.half, d, nx, nz, px, pz };
+      }
+    }
+    return best;
+  };
+  return { group, count: plans.length, floorAt, lamps, query };
 }
