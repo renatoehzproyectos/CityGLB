@@ -217,6 +217,12 @@ export function ControlPanel({ exportFn }: Props) {
                       <dd className="text-right">{(stats.bridges ?? 0).toLocaleString()}</dd>
                     </>
                   )}
+                  {(stats.tunnels ?? 0) > 0 && (
+                    <>
+                      <dt className="text-muted">Tunnels</dt>
+                      <dd className="text-right">{(stats.tunnels ?? 0).toLocaleString()}</dd>
+                    </>
+                  )}
                   {(stats.grassPatches ?? 0) > 0 && (
                     <>
                       <dt className="text-muted">Grass patches</dt>

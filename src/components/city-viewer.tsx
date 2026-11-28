@@ -343,7 +343,7 @@ export function CityViewer({
         // Start vehicle
         vehicleRef.current?.dispose();
         const mode = playModeRef.current as "car" | "plane";
-        const vehicle = createVehicleController(mode, city, meshes.heightGrid, scene, meshes.deckAt);
+        const vehicle = createVehicleController(mode, city, meshes.heightGrid, scene, meshes.surfacesAt);
         const y = mode === "car" ? p.y + 0.5 : p.y + 12;
         vehicle.spawnAt(p.x, y, p.z, 0);
         vehicleRef.current = vehicle;

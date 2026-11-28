@@ -72,6 +72,7 @@ export type CityStats = {
   grassPatches?: number;
   waterBodies?: number;
   bridges?: number;
+  tunnels?: number;
   streetBuildings?: number;
   streetMaterials?: number;
 };

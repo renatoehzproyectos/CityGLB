@@ -15,14 +15,14 @@ export type BridgeResult = { group: THREE.Group; count: number; deckAt: (x: numb
 
 const STEP = 3; // m entre secciones del tablero
 
-const len = (pts: Ring) => {
+export const len = (pts: Ring) => {
   let l = 0;
   for (let i = 1; i < pts.length; i++) l += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
   return l;
 };
 
 /** Puntos a distancia constante a lo largo de la polilínea. */
-function resample(pts: Ring, step: number): Ring {
+export function resample(pts: Ring, step: number): Ring {
   const total = len(pts);
   const n = Math.max(2, Math.ceil(total / step) + 1);
   const out: Ring = [];

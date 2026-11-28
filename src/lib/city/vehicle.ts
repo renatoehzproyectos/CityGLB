@@ -132,7 +132,7 @@ export function createVehicleController(
   city: CityData,
   heightGrid: HeightGrid | null | undefined,
   scene: THREE.Scene,
-  deckAt?: (x: number, z: number) => number | null,
+  surfacesAt?: (x: number, z: number) => number[],
 ): VehicleController {
   const group = mode === "car" ? makeCarMesh() : makePlaneMesh();
   group.name = mode === "car" ? "player-car" : "player-plane";
@@ -208,9 +208,11 @@ export function createVehicleController(
     pos.z += Math.cos(yaw) * speed * dt;
 
     let ground = groundY(heightGrid, pos.x, pos.z);
-    // sobre un puente si el tablero está al alcance (no salta al tablero estando debajo de él)
-    const deck = deckAt?.(pos.x, pos.z);
-    if (deck != null && Math.abs(deck - ground) > 0.05 && Math.abs(deck + 0.4 - pos.y) < 2.5) ground = deck;
+    // puentes y túneles: se elige la superficie más cercana a la altura actual (si está al alcance, < 2.5 m);
+    // así no se salta al tablero estando debajo de él, ni a la superficie del cerro estando dentro del túnel
+    for (const c of surfacesAt?.(pos.x, pos.z) ?? []) {
+      if (Math.abs(c + 0.4 - pos.y) < 2.5 && Math.abs(c + 0.4 - pos.y) < Math.abs(ground + 0.4 - pos.y)) ground = c;
+    }
     pos.y = ground + 0.4;
 
     const before = pos.clone();

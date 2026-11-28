@@ -15,8 +15,8 @@
 import type { HeightGrid } from "./elevation";
 import type { CityData } from "./types";
 
-const TARGET_SPACING_M = 8;
-const MAX_DIM = 260;
+const TARGET_SPACING_M = 3; // para que una calle de 6 m ocupe varias celdas
+const MAX_DIM = 448; // tope de la malla densificada (≈200k vértices)
 
 
 function lowerBound(a: Float32Array, v: number): number {
@@ -28,7 +28,7 @@ function lowerBound(a: Float32Array, v: number): number {
   return lo;
 }
 
-function bilinear(g: HeightGrid, x: number, zN: number): number {
+export function bilinear(g: HeightGrid, x: number, zN: number): number {
   const { width, height, data, xs, zs } = g;
   const i = lowerBound(xs, x), j = lowerBound(zs, zN);
   const i1 = Math.min(i + 1, width - 1), j1 = Math.min(j + 1, height - 1);
@@ -128,7 +128,7 @@ function distToRing(x: number, z: number, ring: [number, number][]): number {
   return best;
 }
 
-export type FlattenStats = { cells: number; flatCells: number; pads: number };
+export type FlattenStats = { cells: number; flatCells: number; pads: number; roadsLeveled: number; spacing: number };
 
 export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightGrid; stats: FlattenStats } {
   const g = densify(src);
@@ -146,19 +146,7 @@ export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightG
   };
 
   // 1) Máscara de "debería ser plano"
-  let mask = new Float32Array(n);
-  for (const r of data.roads ?? []) {
-    if (r.bridge || r.tunnel || r.width < 3.5) continue; // puentes: fase 3; sendas: siguen el relieve
-    const reach = r.width / 2 + 2;
-    for (let k = 0; k < r.pts.length - 1; k++) {
-      const [ax, az] = r.pts[k], [bx, bz] = r.pts[k + 1];
-      const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
-      cellsIn(Math.min(ax, bx) - reach, Math.max(ax, bx) + reach, Math.min(az, bz) - reach, Math.max(az, bz) + reach, (i, j, x, z) => {
-        const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
-        if (Math.hypot(x - (ax + dx * t), z - (az + dz * t)) <= reach) mask[j * w + i] = 1;
-      });
-    }
-  }
+  let mask: Float32Array = new Float32Array(n);
   for (const b of data.buildings) {
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     for (const [x, z] of b.ring) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
@@ -203,7 +191,64 @@ export function flattenTerrain(src: HeightGrid, data: CityData): { grid: HeightG
     pads++;
   }
 
+  // 4) Nivelación de calzadas: la sección transversal queda PLANA (sin "roll"); el perfil longitudinal sigue el
+  //    terreno suavizado. En ladera: corte en el lado alto y relleno en el bajo, con talud suave hacia el terreno.
+  let roadsLeveled = 0;
+  const G = blur(g.data, w, h, 1, 1); // terreno casi crudo (sin erosión) para leer el perfil
+  const num = new Float32Array(n), den = new Float32Array(n), wmax = new Float32Array(n);
+  const gG: HeightGrid = { ...g, data: G };
+  const hAt = (x: number, z: number) => bilinear(gG, x, -z);
+  for (const r of data.roads ?? []) {
+    if (r.bridge || r.tunnel || r.width < 3.5 || r.cls === "rail") continue; // puentes/túneles: fases 3-4; sendas: siguen el relieve
+    const half = r.width / 2;
+    const step = Math.max(sp, 2);
+    // remuestreo del eje
+    const S: [number, number][] = [];
+    let next = 0; // distancia, dentro del tramo actual, donde va la próxima muestra
+    for (let k = 0; k < r.pts.length - 1; k++) {
+      const [ax, az] = r.pts[k], [bx, bz] = r.pts[k + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      while (next < L) { S.push([ax + ((bx - ax) * next) / L, az + ((bz - az) * next) / L]); next += step; }
+      next -= L;
+    }
+    S.push(r.pts[r.pts.length - 1]);
+    if (S.length < 2) continue;
+    // perfil: altura en el eje, suavizada a lo largo de la vía (quita ruido de edificios/copas)
+    let p = S.map(([x, z]) => hAt(x, z));
+    const win = Math.max(2, Math.round(24 / step));
+    for (let pass = 0; pass < 3; pass++) {
+      const q = p.slice();
+      for (let i = 0; i < p.length; i++) {
+        let sum = 0, c = 0;
+        for (let k = Math.max(0, i - win); k <= Math.min(p.length - 1, i + win); k++) { sum += q[k]; c++; }
+        p[i] = sum / c;
+      }
+    }
+    const full = half + 1.2; // semiancho plano (con holgura por el desfase foto/mapa)
+    const shoulder = Math.min(14, Math.max(3, sp * 1.2)); // talud hacia el terreno natural
+    const reach = full + shoulder;
+    for (let k = 0; k < S.length - 1; k++) {
+      const [ax, az] = S[k], [bx, bz] = S[k + 1];
+      const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+      cellsIn(Math.min(ax, bx) - reach, Math.max(ax, bx) + reach, Math.min(az, bz) - reach, Math.max(az, bz) + reach, (i, j, x, z) => {
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+        const d = Math.hypot(x - (ax + dx * t), z - (az + dz * t));
+        if (d >= reach) return;
+        const u = d <= full ? 1 : 1 - (d - full) / shoulder;
+        const wt = u * u * (3 - 2 * u);
+        const ph = p[k] + (p[k + 1] - p[k]) * t;
+        const c = j * w + i;
+        num[c] += wt * ph; den[c] += wt;
+        if (wt > wmax[c]) wmax[c] = wt;
+      });
+    }
+    roadsLeveled++;
+  }
+  for (let c = 0; c < n; c++) {
+    if (wmax[c] > 0 && den[c] > 0) out[c] = out[c] * (1 - wmax[c]) + (num[c] / den[c]) * wmax[c];
+  }
+
   let minH = Infinity, maxH = -Infinity;
   for (let i = 0; i < n; i++) { if (out[i] < minH) minH = out[i]; if (out[i] > maxH) maxH = out[i]; }
-  return { grid: { ...g, data: out, minH, maxH }, stats: { cells: n, flatCells, pads } };
+  return { grid: { ...g, data: out, minH, maxH }, stats: { cells: n, flatCells, pads, roadsLeveled, spacing: sp } };
 }

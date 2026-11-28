@@ -22,5 +22,5 @@ export function attachLandData(data: CityData, land: LandResponse): void {
       tunnel: !!r.t,
       pts: r.l.map(proj),
     }))
-    .filter((r) => r.pts.length >= 2 && !r.tunnel);
+    .filter((r) => r.pts.length >= 2); // los túneles se conservan (fase 4)
 }

@@ -12,6 +12,7 @@ import { buildWaterMesh } from "./water";
 import { analyzeVegetation } from "./vegetation";
 import { flattenTerrain } from "./flatten";
 import { buildBridges, collectBridges } from "./bridges";
+import { buildTunnels, openCutRoads, planTunnels, type TunnelPlan } from "./tunnels";
 import { buildVegetation } from "./vegetation-gl";
 import type { SeaMaterial, WaterConfig } from "./water-material";
 import { computeOBB, createRoofSampler, fanRoof, isConvex, ridgeRoof, type OBB, type RoofSampler } from "./roofs";
@@ -608,11 +609,15 @@ export type CityMeshes = {
   bridges?: THREE.Object3D;
   /** Altura del tablero de un puente en (x,z), o null si no hay puente ahí. */
   deckAt?: (x: number, z: number) => number | null;
+  /** Túneles (interior con luminarias, portales, trincheras). */
+  tunnels?: THREE.Object3D;
+  /** Cotas por las que puede circular un vehículo en (x,z): tablero de puente y/o solera de túnel. */
+  surfacesAt?: (x: number, z: number) => number[];
   /** Avanza animaciones (olas, viento). Llamar cada fotograma con el tiempo en segundos. */
   update?: (timeSec: number) => void;
   /** Pasa al agua el sol y el cielo de la escena para sus reflejos. */
   configureWater?: (c: WaterConfig) => void;
-  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; treeModels: number; grassPatches: number; waterBodies: number; bridges: number; streetBuildings: number; streetMaterials: number };
+  stats: { buildings: number; vertices: number; aiBuildings: number; trees: number; treeModels: number; grassPatches: number; waterBodies: number; bridges: number; tunnels: number; streetBuildings: number; streetMaterials: number };
   heightGrid?: HeightGrid | null;
 };
 
@@ -654,12 +659,12 @@ export async function buildCityMeshes(
   onProgress?.(0.1, "Loading terrain data…");
 
   const rawGrid = await elevPromise;
-  let grid = rawGrid;
+  let gridW = rawGrid; // se reasigna (aplanado, túneles); luego se congela en `grid`
   if (rawGrid && cfg.FLATTEN_URBAN) {
     try {
       onProgress?.(0.3, "Flattening urban terrain…");
       const f = flattenTerrain(rawGrid, data);
-      grid = f.grid;
+      gridW = f.grid;
       console.info("[flatten]", f.stats);
     } catch (e) {
       console.warn("Flatten failed; using raw terrain", e);
@@ -702,6 +707,20 @@ export async function buildCityMeshes(
     side: THREE.DoubleSide,
   });
 
+  // Túneles: planifica rasante y talla las trincheras en la malla de alturas ANTES de crear el terreno
+  let tunnelPlans: TunnelPlan[] = [];
+  if (gridW && data.roads?.some((r) => r.tunnel)) {
+    try {
+      onProgress?.(0.5, "Planning tunnels…");
+      const tp = planTunnels(data, gridW);
+      gridW = tp.grid;
+      tunnelPlans = tp.plans;
+    } catch (e) {
+      console.warn("Tunnels planning failed", e);
+    }
+  }
+
+  const grid = gridW;
   const terrainGeo = grid
     ? terrainGeometryFromGrid(grid, data.extent)
     : flatTerrainGeometry(data);
@@ -804,17 +823,40 @@ export async function buildCityMeshes(
       console.warn("Bridges failed", e);
     }
   }
+  let tunnelsObj: THREE.Object3D | undefined;
+  let tunnelFloorAt: ((x: number, z: number) => number | null) | undefined;
+  let tunnelCount = 0;
+  if (tunnelPlans.length) {
+    try {
+      onProgress?.(0.93, "Building tunnels…");
+      const t = buildTunnels(tunnelPlans);
+      if (t) {
+        tunnelsObj = t.group;
+        tunnelFloorAt = t.floorAt;
+        tunnelCount = t.count;
+        group.add(t.group);
+        t.group.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (m.isMesh) vertices += m.geometry.getAttribute("position").count;
+        });
+      }
+    } catch (e) {
+      console.warn("Tunnels failed", e);
+    }
+  }
   let treesObj: THREE.Object3D | undefined;
   let grassObj: THREE.Object3D | undefined;
   let treeCount = 0;
   let treeModels = 0;
   let grassPatches = 0;
   let vegTick: ((t: number) => void) | undefined;
+  // los árboles crecen SOBRE los túneles (no se apartan), pero no dentro de las trincheras abiertas
+  const vegData: CityData = { ...data, roads: [...(data.roads ?? []).filter((r) => !r.tunnel), ...openCutRoads(tunnelPlans)] };
   if (satCanvas || data.osmTrees?.length) {
     try {
       onProgress?.(0.94, "Placing vegetation…");
       const veg = satCanvas
-        ? analyzeVegetation(satCanvas, data, roofSampler)
+        ? analyzeVegetation(satCanvas, vegData, roofSampler)
         : { trees: [], grass: [], coverUsed: false };
       const built = await buildVegetation(veg.trees, veg.grass, groundAt, {
         x: (data.extent.minX + data.extent.maxX) / 2,
@@ -850,6 +892,15 @@ export async function buildCityMeshes(
     grass: grassObj,
     bridges: bridgesObj,
     deckAt,
+    tunnels: tunnelsObj,
+    surfacesAt: (x, z) => {
+      const out: number[] = [];
+      const d = deckAt?.(x, z);
+      if (d != null) out.push(d);
+      const t = tunnelFloorAt?.(x, z);
+      if (t != null) out.push(t);
+      return out;
+    },
     update: (t) => {
       if (waterMesh) (waterMesh.material as SeaMaterial).tick?.(t);
       vegTick?.(t);
@@ -866,6 +917,7 @@ export async function buildCityMeshes(
       grassPatches,
       waterBodies,
       bridges: bridgeCount,
+      tunnels: tunnelCount,
       streetBuildings: data.buildings.reduce((n, b) => n + (b.street ? 1 : 0), 0),
       streetMaterials: data.buildings.reduce((n, b) => n + (b.streetMaterial ? 1 : 0), 0),
     },
